@@ -557,45 +557,55 @@ def gen_collab(session, cleanroom_name, prov_ids, cons_ids, temp_ids, enable_act
          except:
              cons_acct = "ORG.REPLACE_CONSUMER_ACCOUNT" 
 
+    is_single_account = (
+        prov_acct.upper().strip() == cons_acct.upper().strip()
+        and 'REPLACE' not in cons_acct.upper()
+    )
+
     runners = {}
 
-    cons_runner_config = {
-        'templates': [{'id': x} for x in temp_ids]
-    }
-    
-    cons_runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}} if prov_ids else {}
-
-    if enable_activation:
-        cons_runner_config['activation_destinations'] = {'snowflake_collaborators': ['Consumer_Account']}
-
-    runners['Consumer_Account'] = cons_runner_config
-
-    if cons_ids:
-        prov_runner_config = {
-            'templates': [{'id': x} for x in temp_ids],
-            'data_providers': {'Consumer_Account': {'data_offerings': [{'id': x} for x in cons_ids]}}
+    if is_single_account:
+        runner_config = {
+            'templates': [{'id': x} for x in temp_ids]
         }
+        runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}} if prov_ids else {}
         if enable_activation:
-             prov_runner_config['activation_destinations'] = {'snowflake_collaborators': ['Consumer_Account']}
-        runners['Provider_Account'] = prov_runner_config
-    
+            runner_config['activation_destinations'] = {'snowflake_collaborators': ['Provider_Account']}
+        runners['Provider_Account'] = runner_config
     else:
-        can_prov_run = False
-        try:
-            res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.LIBRARY.IS_PROVIDER_RUN_ENABLED('{cleanroom_name}')").collect()
-            if res:
-                 val = str(res[0][0]).lower()
-                 if "provider side run analysis is enabled" in val: can_prov_run = True
-        except: pass
-        
-        if can_prov_run:
+        cons_runner_config = {
+            'templates': [{'id': x} for x in temp_ids]
+        }
+        cons_runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}} if prov_ids else {}
+        if enable_activation:
+            cons_runner_config['activation_destinations'] = {'snowflake_collaborators': ['Consumer_Account']}
+        runners['Consumer_Account'] = cons_runner_config
+
+        if cons_ids:
             prov_runner_config = {
                 'templates': [{'id': x} for x in temp_ids],
-                'data_providers': {'Consumer_Account': {'data_offerings': []}} 
+                'data_providers': {'Consumer_Account': {'data_offerings': [{'id': x} for x in cons_ids]}}
             }
             if enable_activation:
                  prov_runner_config['activation_destinations'] = {'snowflake_collaborators': ['Consumer_Account']}
             runners['Provider_Account'] = prov_runner_config
+        else:
+            can_prov_run = False
+            try:
+                res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.LIBRARY.IS_PROVIDER_RUN_ENABLED('{cleanroom_name}')").collect()
+                if res:
+                     val = str(res[0][0]).lower()
+                     if "provider side run analysis is enabled" in val: can_prov_run = True
+            except: pass
+            
+            if can_prov_run:
+                prov_runner_config = {
+                    'templates': [{'id': x} for x in temp_ids],
+                    'data_providers': {'Consumer_Account': {'data_offerings': []}} 
+                }
+                if enable_activation:
+                     prov_runner_config['activation_destinations'] = {'snowflake_collaborators': ['Consumer_Account']}
+                runners['Provider_Account'] = prov_runner_config
 
     ver_str = "MIGRATION_V1"
 
@@ -608,12 +618,19 @@ def gen_collab(session, cleanroom_name, prov_ids, cons_ids, temp_ids, enable_act
     yaml_str += f"version: {ver_str}\n"
     yaml_str += f"owner: Provider_Account\n"
     
-    aliases = {
-        'collaborator_identifier_aliases': {
-            'Provider_Account': prov_acct,
-            'Consumer_Account': cons_acct
+    if is_single_account:
+        aliases = {
+            'collaborator_identifier_aliases': {
+                'Provider_Account': prov_acct
+            }
         }
-    }
+    else:
+        aliases = {
+            'collaborator_identifier_aliases': {
+                'Provider_Account': prov_acct,
+                'Consumer_Account': cons_acct
+            }
+        }
     yaml_str += yaml.dump(aliases, sort_keys=False)
     runners_dict = {'analysis_runners': runners}
     yaml_str += yaml.dump(runners_dict, sort_keys=False)
