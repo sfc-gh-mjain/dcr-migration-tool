@@ -121,7 +121,8 @@ def execute_migration(cleanroom_name):
 def initialize_collaboration(collab_spec):
     """Call INITIALIZE directly from Streamlit (not inside a stored procedure)."""
     try:
-        res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE($$ {collab_spec} $$)").collect()
+        spec = collab_spec.strip()
+        res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE($$\n{spec}\n$$)").collect()
         collab_name = ""
         msg = ""
         if res:
