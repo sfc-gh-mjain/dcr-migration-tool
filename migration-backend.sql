@@ -23,65 +23,90 @@ AS
 $$
 def check_prereqs(session, cleanroom_name):
     errors = []
-    
-    # 1. Check Consumer-level LAF
-    try:
-        is_cons = session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.IS_ENABLED", cleanroom_name)
-        if is_cons:
-            is_laf_cr = session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.IS_LAF_ENABLED_FOR_CLEANROOM", cleanroom_name)
-            if is_laf_cr:
-                errors.append(f"LAF is enabled for cleanroom '{cleanroom_name}'. Migration not supported.")
-    except: pass
+    warnings = []
 
-    # 2. Provider Checks (Multi-Provider, UI Cleanroom, Python)
+    found_as_provider = False
+    found_as_consumer = False
+    target_uuid = None
+
+    # 1. Provider-side discovery and checks
     try:
-        # Fetch cleanrooms to check for UI status
         p_res = session.sql("CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.VIEW_CLEANROOMS()").collect()
-        is_ui_room = False
-        target_uuid = None
-        
         for r in p_res:
             d = {k.upper(): v for k, v in r.as_dict().items()}
             c_name = d.get('CLEANROOM_NAME') or d.get('NAME')
             c_id = d.get('CLEANROOM_ID') or d.get('ID')
-            
-            # FIX: Normalize name for comparison (Spaces <-> Underscores)
+
             if c_name and c_name.upper().replace(' ', '_') == cleanroom_name.upper().replace(' ', '_'):
+                found_as_provider = True
+                target_uuid = c_id
+
                 # UI Cleanroom Check: Name != ID implies UI creation
                 if str(c_name).upper().replace(' ', '_') != str(c_id).upper().replace(' ', '_'):
-                    is_ui_room = True
-                
-                # Capture UUID for other checks
-                target_uuid = c_id
+                    errors.append(f"Cleanroom '{cleanroom_name}' is a UI-created cleanroom (name='{c_name}', id='{c_id}'). UI cleanroom migration is not supported.")
+
                 break
-        
-        if is_ui_room:
-            errors.append(f"Cleanroom '{cleanroom_name}' is a UI-created cleanroom. Migration is not supported.")
+    except Exception as e:
+        warnings.append(f"Could not list provider cleanrooms: {str(e)[:200]}")
 
-        if target_uuid:
-            try:
-                mp_check = session.sql(f"SHOW TABLES LIKE 'APPROVED_MULTIPROVIDER_CLEANROOMS' IN SCHEMA SAMOOHA_CLEANROOM_{target_uuid}.ADMIN").collect()
-                if len(mp_check) > 0:
-                    rows = session.sql(f"SELECT COUNT(*) as CNT FROM SAMOOHA_CLEANROOM_{target_uuid}.ADMIN.APPROVED_MULTIPROVIDER_CLEANROOMS").collect()
-                    if rows and rows[0]['CNT'] > 0:
-                        errors.append("Multi-provider cleanroom migration is not supported.")
-            except: pass
+    # 2. Consumer-side discovery
+    if not found_as_provider:
+        try:
+            is_cons = session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.IS_ENABLED", cleanroom_name)
+            if is_cons:
+                found_as_consumer = True
+        except:
+            pass
 
-            # Check Python Code
-            try:
-                py_files = session.sql(f"ls @SAMOOHA_CLEANROOM_{target_uuid}.APP.CODE/V1_0P1").collect()
-                # FIX: Only flag if actual python files exist
-                for f in py_files:
-                    fname = f['name'].lower()
-                    if fname.endswith('.py') or fname.endswith('.zip'):
-                        errors.append("Cleanroom uses Python code, which is not supported in this release.")
-                        break
-            except: pass
+    # 3. Not found at all
+    if not found_as_provider and not found_as_consumer:
+        errors.append(f"Cleanroom '{cleanroom_name}' was not found as either a provider or consumer cleanroom. Please verify the cleanroom name is correct (use the exact P&C API name, not a UUID).")
+        return {"status": "FAIL", "errors": errors, "warnings": warnings}
 
-    except: pass
+    # 4. LAF Check (both sides)
+    try:
+        if found_as_consumer:
+            is_laf = session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.IS_LAF_ENABLED_FOR_CLEANROOM", cleanroom_name)
+            if is_laf:
+                errors.append(f"LAF (Cross-Cloud Auto-Fulfillment) is enabled for cleanroom '{cleanroom_name}'. LAF cleanroom migration is not supported.")
+    except:
+        pass
 
-    if errors: return {"status": "FAIL", "errors": errors}
-    return {"status": "PASS"}
+    try:
+        res = session.sql("CALL samooha_by_snowflake_local_db.library.is_laf_enabled_on_account()").collect()
+        if res and str(res[0][0]).upper() == 'TRUE':
+            if not any('LAF' in e for e in errors):
+                warnings.append("LAF is enabled on this account. If this specific cleanroom uses LAF, migration may not be supported. Please verify.")
+    except:
+        pass
+
+    # 5. Provider-side deep checks (multi-provider, python)
+    if target_uuid:
+        try:
+            mp_check = session.sql(f"SHOW TABLES LIKE 'APPROVED_MULTIPROVIDER_CLEANROOMS' IN SCHEMA SAMOOHA_CLEANROOM_{target_uuid}.ADMIN").collect()
+            if len(mp_check) > 0:
+                rows = session.sql(f"SELECT COUNT(*) as CNT FROM SAMOOHA_CLEANROOM_{target_uuid}.ADMIN.APPROVED_MULTIPROVIDER_CLEANROOMS").collect()
+                if rows and rows[0]['CNT'] > 0:
+                    errors.append("Multi-provider cleanroom migration is not supported.")
+        except:
+            pass
+
+        try:
+            py_files = session.sql(f"ls @SAMOOHA_CLEANROOM_{target_uuid}.APP.CODE/V1_0P1").collect()
+            for f in py_files:
+                fname = f['name'].lower()
+                if fname.endswith('.py') or fname.endswith('.zip'):
+                    errors.append("Cleanroom uses Python code, which is not supported in this release.")
+                    break
+        except:
+            pass
+
+    if errors:
+        return {"status": "FAIL", "errors": errors, "warnings": warnings}
+    result = {"status": "PASS"}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 $$;
 
 CREATE OR REPLACE PROCEDURE DCR_SNOWVA.MIGRATION.PREVIEW(CLEANROOM_NAME STRING)
@@ -283,15 +308,24 @@ def gen_templates(session, cleanroom_name):
                     try: params = json.loads(raw_params)
                     except: params = yaml.safe_load(raw_params)
                 else: params = raw_params
+                if not isinstance(params, list):
+                    params = []
             except: pass
 
-        if not params and cleaned_sql:
+        system_vars = ['source_table', 'my_table', 'consumer_table', 'provider_table', 'dimensions', 'measures']
+        existing_param_names = set()
+        if params:
+            for p in params:
+                if isinstance(p, dict) and 'name' in p:
+                    existing_param_names.add(p['name'].lower())
+            params = [p for p in params if isinstance(p, dict) and p.get('name', '').lower() not in system_vars]
+
+        if cleaned_sql:
             jinja_vars = re.findall(r"\{\{\s*([a-zA-Z0-9_]+)", cleaned_sql)
-            system_vars = ['source_table', 'my_table', 'consumer_table', 'provider_table', 'dimensions', 'measures']
-            seen = set()
+            seen = set(existing_param_names)
             for v in jinja_vars:
-                if v.lower() not in system_vars and v not in seen:
-                    seen.add(v)
+                if v.lower() not in system_vars and v.lower() not in seen:
+                    seen.add(v.lower())
                     params.append({
                         "name": v,
                         "type": "string",
@@ -371,12 +405,14 @@ def gen_data_offerings(session, cleanroom_name):
         except: return pd.DataFrame()
 
     def sanitize_name(name):
-        clean = name.replace('.', '_')
+        clean = re.sub(r'[^A-Za-z0-9_]', '_', name)
         if len(clean) > 75:
             h = hashlib.md5(name.encode()).hexdigest()[:8]
             clean = f"{clean[:60]}_{h}"
-        if not clean[0].isalpha() and clean[0] != '_': clean = "T_" + clean
+        if not clean[0].isalpha() and clean[0] != '_':
+            clean = "T_" + clean
         return clean
+
 
     is_provider = False
     try:
@@ -433,8 +469,9 @@ def gen_data_offerings(session, cleanroom_name):
         if cons_res:
             for row in cons_res:
                 d = {k.upper(): v for k, v in row.as_dict().items()}
-                t_name = d.get('LINKED_TABLE') or d.get('TABLE_NAME') or d.get('VIEW_NAME')
-                tables_data.append({'TABLE_NAME': t_name, 'SQL_ENABLED': False})
+                t_name = d.get('TABLE_NAME')
+                if t_name:
+                    tables_data.append({'TABLE_NAME': t_name, 'SQL_ENABLED': False})
         
         join_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_join_policy('{cleanroom_name}')")
         col_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_column_policy('{cleanroom_name}')")
@@ -527,35 +564,53 @@ import yaml
 from datetime import datetime
 
 def gen_collab(session, cleanroom_name, prov_ids, cons_ids, temp_ids, enable_activation):
-    cr_res = session.sql(f"SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.CLEANROOM_RECORD WHERE UPPER(CLEANROOM_NAME) = '{cleanroom_name.upper()}'").collect()
-    
+    try:
+        cr_res = session.sql(f"SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.CLEANROOM_RECORD WHERE UPPER(CLEANROOM_NAME) = '{cleanroom_name.upper()}'").collect()
+    except:
+        cr_res = []
+
     prov_acct = "PROVIDER_ACCOUNT"
     if cr_res:
         cr = {k.upper(): v for k, v in cr_res[0].as_dict().items()}
         for k,v in cr.items():
-            if "PROVIDER" in k and "LOCATOR" in k: prov_acct = v
+            if "PROVIDER" in k and "LOCATOR" in k and v:
+                prov_acct = v
 
     if prov_acct == "PROVIDER_ACCOUNT" or '.' not in prov_acct:
         try:
             curr_org = session.sql("SELECT CURRENT_ORGANIZATION_NAME()").collect()[0][0]
-            if prov_acct == "PROVIDER_ACCOUNT": prov_acct = f"{curr_org}.PROVIDER_ACCOUNT"
-            else: prov_acct = f"{curr_org}.{prov_acct}"
+            curr_acct = session.sql("SELECT CURRENT_ACCOUNT_NAME()").collect()[0][0]
+            if prov_acct == "PROVIDER_ACCOUNT":
+                prov_acct = f"{curr_org}.{curr_acct}"
+            else:
+                prov_acct = f"{curr_org}.{prov_acct}"
         except: pass
-    
-    cons_res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.VIEW_CONSUMERS('{cleanroom_name}')").collect()
+
     cons_acct = "CONSUMER_ACCOUNT"
-    if cons_res:
-        c_dict = {k.upper(): v for k, v in cons_res[0].as_dict().items()}
-        for k,v in c_dict.items():
-            if 'NAME' in k or 'ACCOUNT' in k: 
-                cons_acct = v; break
-    
-    if cons_acct == "CONSUMER_ACCOUNT" or '.' not in cons_acct:
+    consumer_resolved = False
+    try:
+        cons_res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.VIEW_CONSUMERS('{cleanroom_name}')").collect()
+        if cons_res:
+            c_dict = {k.upper(): v for k, v in cons_res[0].as_dict().items()}
+            for k,v in c_dict.items():
+                if ('NAME' in k or 'ACCOUNT' in k) and v:
+                    cons_acct = str(v)
+                    consumer_resolved = True
+                    break
+    except:
+        pass
+
+    if not consumer_resolved or cons_acct == "CONSUMER_ACCOUNT" or '.' not in cons_acct:
          try:
              curr_org = session.sql("SELECT CURRENT_ORGANIZATION_NAME()").collect()[0][0]
-             cons_acct = f"{curr_org}.REPLACE_CONSUMER_ACCOUNT"
+             if consumer_resolved and cons_acct != "CONSUMER_ACCOUNT":
+                 cons_acct = f"{curr_org}.{cons_acct}"
+             else:
+                 cons_acct = f"{curr_org}.REPLACE_WITH_CONSUMER_ACCOUNT"
+                 consumer_resolved = False
          except:
-             cons_acct = "ORG.REPLACE_CONSUMER_ACCOUNT" 
+             if not consumer_resolved:
+                 cons_acct = "ORG.REPLACE_WITH_CONSUMER_ACCOUNT"
 
     is_single_account = (
         prov_acct.upper().strip() == cons_acct.upper().strip()
@@ -635,6 +690,9 @@ def gen_collab(session, cleanroom_name, prov_ids, cons_ids, temp_ids, enable_act
     runners_dict = {'analysis_runners': runners}
     yaml_str += yaml.dump(runners_dict, sort_keys=False)
 
+    if not consumer_resolved and not is_single_account:
+        yaml_str = f"# WARNING: Consumer account could not be resolved automatically.\n# Please replace 'REPLACE_WITH_CONSUMER_ACCOUNT' with the actual ORG.ACCOUNT identifier.\n" + yaml_str
+
     return yaml_str
 $$;
 
@@ -709,10 +767,13 @@ $$
 import pandas as pd
 
 def validate(session, cleanroom_name, collab_name):
-    report = {"overall_status": "PASS", "steps": [], "missing_objects": []}
-    def log_step(name, status, details=""):
-        report['steps'].append({"name": name, "status": status, "details": details})
-        if status == "FAIL": report['overall_status'] = "FAIL"
+    report = {"overall_status": "PASS", "steps": [], "missing_objects": [], "remediation": []}
+    def log_step(name, status, details="", fix_hint=""):
+        report['steps'].append({"name": name, "status": status, "details": details, "fix_hint": fix_hint})
+        if status == "FAIL":
+            report['overall_status'] = "FAIL"
+            if fix_hint:
+                report['remediation'].append(f"[{name}] {fix_hint}")
 
     try:
         is_provider = False
@@ -723,8 +784,9 @@ def validate(session, cleanroom_name, collab_name):
                 c_name = d.get('CLEANROOM_NAME') or d.get('NAME')
                 c_id = d.get('CLEANROOM_ID') or d.get('ID')
                 c_state = d.get('STATE') or d.get('STATUS')
-                if c_name and c_name.upper() == cleanroom_name.upper():
-                    if str(c_name).upper().replace(' ', '_') == str(c_id).upper().replace(' ', '_') and c_state == 'CREATED': is_provider = True
+                if c_name and c_name.upper().replace(' ', '_') == cleanroom_name.upper().replace(' ', '_'):
+                    if str(c_name).upper().replace(' ', '_') == str(c_id).upper().replace(' ', '_') and c_state == 'CREATED':
+                        is_provider = True
                     break
         except: pass
 
@@ -734,16 +796,17 @@ def validate(session, cleanroom_name, collab_name):
                 status_val = str(list(res[0].as_dict().values())[0])
                 log_step("Collaboration Status", "PASS", f"Current Status: {status_val}")
             else:
-                log_step("Collaboration Status", "FAIL", "Collaboration not found")
+                log_step("Collaboration Status", "FAIL", "Collaboration not found.",
+                    f"Run the migration EXECUTE step first, or check that '{collab_name}' was initialized successfully.")
         except Exception as e:
-            log_step("Collaboration Status", "FAIL", str(e))
+            err_msg = str(e)[:300]
+            log_step("Collaboration Status", "FAIL", err_msg,
+                f"Collaboration '{collab_name}' may not exist. Ensure the EXECUTE step completed without errors. Check: CALL samooha_by_snowflake_local_db.collaboration.get_status('{collab_name}');")
 
         if is_provider:
-            # FIX: Robust check for Template Parity
             try:
                 legacy_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.VIEW_ADDED_TEMPLATES('{cleanroom_name}')").collect()
                 legacy_names = [r['TEMPLATE_NAME'] for r in legacy_df] if legacy_df else []
-                # UPDATED: Use Collaboration view to check parity
                 new_templates_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.VIEW_TEMPLATES('{collab_name}')").collect()
                 new_template_names = set()
                 if new_templates_df:
@@ -751,20 +814,21 @@ def validate(session, cleanroom_name, collab_name):
                         row_dict = {k.upper(): v for k, v in r.as_dict().items()}
                         name = row_dict.get('NAME') or row_dict.get('TEMPLATE_NAME')
                         if name: new_template_names.add(name)
-                
+
                 missing = [f"migrated_{old}" for old in legacy_names if f"migrated_{old}" not in new_template_names]
-                if not missing: log_step("Template Parity", "PASS", f"All {len(legacy_names)} found.")
-                else: 
-                     log_step("Template Parity", "FAIL", f"Missing: {missing}")
+                if not missing:
+                    log_step("Template Parity", "PASS", f"All {len(legacy_names)} templates found in new collaboration.")
+                else:
+                     log_step("Template Parity", "FAIL", f"Missing templates: {missing}",
+                         f"Re-register missing templates using: CALL samooha_by_snowflake_local_db.registry.register_template(...)  Then re-run EXECUTE.")
                      report['missing_objects'].extend(missing)
             except Exception as e:
-                log_step("Template Parity", "FAIL", str(e))
+                log_step("Template Parity", "FAIL", str(e)[:300],
+                    "Could not query templates. Verify the collaboration exists and you have SAMOOHA_APP_ROLE.")
 
-            # FIX: Robust check for Data Offering Parity
             try:
                 prov_ds = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.view_provider_datasets('{cleanroom_name}')").collect()
                 legacy_tables = [r['TABLE_NAME'] for r in prov_ds if "TEMP_PUBLIC_KEY" not in r['TABLE_NAME']] if prov_ds else []
-                # UPDATED: Use Collaboration view to check parity
                 new_dos_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.VIEW_DATA_OFFERINGS('{collab_name}')").collect()
                 new_do_names = set()
                 if new_dos_df:
@@ -772,29 +836,35 @@ def validate(session, cleanroom_name, collab_name):
                         row_dict = {k.upper(): v for k, v in r.as_dict().items()}
                         name = row_dict.get('NAME') or row_dict.get('DATA_OFFERING_NAME')
                         if name: new_do_names.add(name)
-                
+
                 missing_dos = []
                 for t in legacy_tables:
-                    # Basic sanitation check matching generator
                     sanitized = f"migrated_{t.replace('.', '_')}"
                     found = False
                     for n in new_do_names:
-                        if n.startswith(sanitized[:50]): found = True; break
-                    if not found: missing_dos.append(sanitized)
+                        if n.startswith(sanitized[:50]):
+                            found = True
+                            break
+                    if not found:
+                        missing_dos.append(sanitized)
 
-                if not missing_dos: log_step("Data Offering Parity", "PASS", f"All {len(legacy_tables)} found.")
-                else: 
-                    log_step("Data Offering Parity", "FAIL", f"Potential missing: {missing_dos}")
+                if not missing_dos:
+                    log_step("Data Offering Parity", "PASS", f"All {len(legacy_tables)} data offerings found in new collaboration.")
+                else:
+                    log_step("Data Offering Parity", "FAIL", f"Missing data offerings: {missing_dos}",
+                        f"Re-register missing data offerings using: CALL samooha_by_snowflake_local_db.registry.register_data_offering(...)  Then re-run EXECUTE.")
                     report['missing_objects'].extend(missing_dos)
             except Exception as e:
-                log_step("Data Offering Parity", "FAIL", str(e))
+                log_step("Data Offering Parity", "FAIL", str(e)[:300],
+                    "Could not query data offerings. Verify the collaboration exists and you have SAMOOHA_APP_ROLE.")
         else:
-             log_step("Consumer Check", "INFO", "Verified Collaboration Access.")
+             log_step("Consumer Check", "INFO", "Consumer-side validation: verified collaboration access. Full parity checks run from the provider side.")
 
     except Exception as e:
         report['overall_status'] = "ERROR"
         report['error'] = str(e)
-        
+        report['remediation'].append(f"Unexpected error during validation: {str(e)[:300]}. Verify both the legacy cleanroom and new collaboration exist.")
+
     return report
 $$;
 
@@ -875,8 +945,11 @@ def agent_main(session, cleanroom_name, action_mode):
 
         check = session.call("DCR_SNOWVA.MIGRATION.CHECK_PREREQUISITES", cleanroom_name)
         if isinstance(check, str): check = json.loads(check)
+        prereq_warnings = check.get('warnings', [])
         if check.get('status') == 'FAIL':
-             return json.dumps({"status": "ERROR", "message": f"Prerequisites failed: {check.get('errors')}"})
+             errors = check.get('errors', [])
+             msg = " | ".join(errors) if errors else "Prerequisites check failed."
+             return json.dumps({"status": "ERROR", "message": msg, "warnings": prereq_warnings})
         
         is_provider = False
         try:
@@ -886,8 +959,7 @@ def agent_main(session, cleanroom_name, action_mode):
                 c_name = d.get('CLEANROOM_NAME') or d.get('NAME')
                 c_id = d.get('CLEANROOM_ID') or d.get('ID')
                 c_state = d.get('STATE') or d.get('STATUS')
-                if c_name and c_name.upper() == cleanroom_name.upper():
-                    # FIX: Case-insensitive check
+                if c_name and c_name.upper().replace(' ', '_') == cleanroom_name.upper().replace(' ', '_'):
                     if str(c_name).upper().replace(' ', '_') == str(c_id).upper().replace(' ', '_') and c_state == 'CREATED': is_provider = True
                     break
         except: pass
@@ -917,7 +989,7 @@ def agent_main(session, cleanroom_name, action_mode):
 
         if not dos and not tmps and action != 'TEARDOWN' and action != 'CHECK_STATUS' and action != 'JOIN':
              if role_type == 'PROVIDER':
-                  return json.dumps({"status": "ERROR", "message": "No data offerings or templates found."})
+                  laf_info += " WARNING: No data offerings or templates were found. The collaboration will be created without them."
 
         script_lines = []
         script_lines.append("USE ROLE SAMOOHA_APP_ROLE;")
@@ -936,14 +1008,6 @@ def agent_main(session, cleanroom_name, action_mode):
                 script_lines.append(f"-- {role_type} Offering: {spec['name']}")
                 script_lines.append(f"CALL samooha_by_snowflake_local_db.registry.register_data_offering({dd}\n{y_str}\n{dd});\n")
 
-        cons_ids = []
-        
-        def get_safe_do_name(spec):
-            orig_name = spec['name']
-            if len(orig_name) > 75:
-                pass
-            return f"{spec['name']}_{spec['version']}"
-
         if is_provider:
              prov_ds_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.view_provider_datasets('{cleanroom_name}')").collect()
              prov_table_names = set()
@@ -952,37 +1016,71 @@ def agent_main(session, cleanroom_name, action_mode):
                      d = {k.upper(): v for k, v in row.as_dict().items()}
                      t_name = d.get('TABLE_NAME')
                      if t_name: prov_table_names.add(t_name)
-             
+
              prov_ids = []
              for y_str in dos:
                 spec = yaml.safe_load(y_str)
-                ds_fqn = spec['datasets'][0].get('data_object_fqn')
-                # DO ID must use version suffix
                 do_id = f"{spec['name']}_{spec['version']}"
-                if ds_fqn in prov_table_names: prov_ids.append(do_id)
-                else: cons_ids.append(do_id)
-             
+                prov_ids.append(do_id)
+
              tmp_ids = []
              has_activation = False
              for y_str in tmps:
                 spec = yaml.safe_load(y_str)
                 t_id = f"{spec['name']}_{spec['version']}"
                 tmp_ids.append(t_id)
-                if spec.get('type') == 'sql_activation': has_activation = True
-             
-             collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, cons_ids, tmp_ids, has_activation)
-             
+                if spec.get('type') == 'sql_activation':
+                    has_activation = True
+                t_sql = str(spec.get('template', '')).lower()
+                if 'activation' in t_sql and ('cleanroom.activation_' in t_sql or 'activation_data' in t_sql):
+                    has_activation = True
+
+             if not has_activation:
+                 try:
+                     cr_rec = session.sql(f"SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.CLEANROOM_RECORD WHERE UPPER(CLEANROOM_NAME) = '{cleanroom_name.upper()}'").collect()
+                     if cr_rec:
+                         cr_d = {k.upper(): v for k, v in cr_rec[0].as_dict().items()}
+                         uuid = cr_d.get('CLEANROOM_ID') or cr_d.get('ID')
+                         if uuid:
+                             try:
+                                 act_res = session.sql(f"SELECT COUNT(*) AS CNT FROM SAMOOHA_CLEANROOM_{uuid}.SHARED_SCHEMA.ACTIVATION_COLUMNS").collect()
+                                 if act_res and act_res[0]['CNT'] > 0:
+                                     has_activation = True
+                             except: pass
+                 except: pass
+
+             collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, [], tmp_ids, has_activation)
+
              script_lines.append(f"\n-- [3] CREATE COLLABORATION: {safe_collab_name}")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.initialize({dd}\n{collab_yml}\n{dd});\n")
              script_lines.append(f"-- Wait for status 'CREATED' before joining")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.get_status('{safe_collab_name}');\n")
              script_lines.append(f"-- [4] JOIN COLLABORATION (Self-Join for Provider)")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}');\n")
+             script_lines.append(f"-- [5] CONSUMER: After joining, the consumer should register their data offerings")
+             script_lines.append(f"-- and add them to the collaboration using:")
+             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.add_data_offering('<collab_name>', '<data_offering_id>');")
         else:
+             if not tmps and not dos:
+                 script_lines.append(f"\n-- NOTE: No templates or data offerings found on the consumer side.")
+                 script_lines.append(f"-- The provider must run migration first to create the collaboration.")
+                 script_lines.append(f"-- Once the collaboration is created, run the following steps:\n")
+
+             if dos:
+                 script_lines.append(f"\n-- [2.5] REGISTER CONSUMER DATA OFFERINGS AFTER JOIN")
+                 script_lines.append(f"-- Register your data offerings first, then add them to the collaboration after joining.\n")
+
              script_lines.append(f"\n-- [3] REVIEW COLLABORATION")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.review('{safe_collab_name}');\n")
              script_lines.append(f"-- [4] JOIN COLLABORATION")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}');\n")
+
+             if dos:
+                 script_lines.append(f"-- [5] ADD CONSUMER DATA OFFERINGS (run after join)")
+                 for y_str in dos:
+                     spec = yaml.safe_load(y_str)
+                     do_id = f"{spec['name']}_{spec['version']}"
+                     script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.add_data_offering('{safe_collab_name}', '{do_id}');\n")
 
         full_script_text = "\n".join(script_lines)
 
@@ -1025,7 +1123,7 @@ def agent_main(session, cleanroom_name, action_mode):
                         else: raise e
 
             if is_provider:
-                collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, cons_ids, tmp_ids, has_activation)
+                collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, [], tmp_ids, has_activation)
                 try:
                     session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE", collab_yml)
                     actions_taken.append(f"Created collaboration '{safe_collab_name}'")
