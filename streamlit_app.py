@@ -53,6 +53,35 @@ def get_session():
 
 session = get_session()
 
+def list_cleanrooms():
+    """Fetch available cleanrooms for the picker."""
+    rooms = []
+    try:
+        p_res = session.sql("CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.VIEW_CLEANROOMS()").collect()
+        if p_res:
+            for r in p_res:
+                d = {k.upper(): v for k, v in r.as_dict().items()}
+                name = d.get('CLEANROOM_NAME') or d.get('NAME')
+                cid = d.get('CLEANROOM_ID') or d.get('ID')
+                state = d.get('STATE') or d.get('STATUS') or ''
+                is_api = str(name).upper().replace(' ', '_') == str(cid).upper().replace(' ', '_') if name and cid else False
+                rooms.append({"name": name, "role": "PROVIDER", "state": state, "api_room": is_api})
+    except:
+        pass
+    try:
+        c_res = session.sql("CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.VIEW_CLEANROOMS()").collect()
+        if c_res:
+            existing_names = {r['name'].upper() for r in rooms if r.get('name')}
+            for r in c_res:
+                d = {k.upper(): v for k, v in r.as_dict().items()}
+                name = d.get('CLEANROOM_NAME') or d.get('NAME')
+                state = d.get('STATE') or d.get('STATUS') or ''
+                if name and name.upper() not in existing_names:
+                    rooms.append({"name": name, "role": "CONSUMER", "state": state, "api_room": True})
+    except:
+        pass
+    return rooms
+
 def get_migration_plan(cleanroom_name):
     try:
         res_str = session.call("DCR_SNOWVA.MIGRATION.AGENT_MIGRATE_ORCHESTRATOR", cleanroom_name, 'PLAN')
@@ -61,10 +90,19 @@ def get_migration_plan(cleanroom_name):
         
         if plan.get("status") == "ERROR":
             msg = plan.get('message', '')
-            if "CleanroomNotInstalled" in msg or "is not installed" in msg:
-                st.error(f"⚠️ Cleanroom '{cleanroom_name}' is not installed/found. Please verify the name.")
+            if "not found" in msg.lower() or "not installed" in msg.lower() or "CleanroomNotInstalled" in msg:
+                st.error(f"Cleanroom '{cleanroom_name}' was not found. Please verify the cleanroom name is correct (use the P&C API name, not a UUID). Use the 'List Cleanrooms' button to see available rooms.")
+            elif "ui-created" in msg.lower() or "ui cleanroom" in msg.lower():
+                st.error(f"Cleanroom '{cleanroom_name}' is a UI-created cleanroom. Migration of UI cleanrooms is not supported in this release.")
+            elif "laf" in msg.lower():
+                st.error(f"Cleanroom '{cleanroom_name}' uses LAF (Cross-Cloud Auto-Fulfillment). LAF cleanroom migration is not supported.")
+            elif "prerequisites" in msg.lower():
+                st.error(f"Prerequisites failed: {msg}")
             else:
-                st.error(f"Backend Error: {msg}")
+                st.error(f"Migration Error: {msg}")
+            warnings = plan.get('warnings', [])
+            for w in warnings:
+                st.warning(w)
             return None
         
         plan['cleanroom_name'] = cleanroom_name
@@ -162,20 +200,48 @@ if not session:
 # Sidebar
 with st.sidebar:
     st.title(" DCR Migration")
-    st.caption("v2.0.0 Migration Toolkit")
+    st.caption("v2.1.0 Migration Toolkit")
     st.divider()
-    
-    cleanroom_input = st.text_input("Cleanroom Name", placeholder="e.g. mj_act_uc")
-    
-    if st.button(" Generate Plan", type="primary", use_container_width=True):
+
+    if st.button("List Cleanrooms", use_container_width=True):
+        with st.spinner("Fetching cleanrooms..."):
+            rooms = list_cleanrooms()
+            if rooms:
+                st.session_state['available_rooms'] = rooms
+            else:
+                st.warning("No cleanrooms found.")
+
+    if 'available_rooms' in st.session_state and st.session_state['available_rooms']:
+        rooms = st.session_state['available_rooms']
+        api_rooms = [r for r in rooms if r.get('api_room')]
+        non_api_rooms = [r for r in rooms if not r.get('api_room')]
+
+        room_options = ["-- Select --"] + [f"{r['name']}  ({r['role']}, {r['state']})" for r in api_rooms]
+        selected = st.selectbox("Eligible Cleanrooms (P&C API)", room_options)
+
+        if non_api_rooms:
+            with st.expander(f"Ineligible: {len(non_api_rooms)} UI cleanrooms"):
+                for r in non_api_rooms:
+                    st.caption(f"{r['name']} ({r['role']}) - UI created, not migratable")
+
+        if selected and selected != "-- Select --":
+            cr_name_from_picker = selected.split("  (")[0].strip()
+            cleanroom_input = st.text_input("Cleanroom Name", value=cr_name_from_picker, placeholder="e.g. mj_act_uc")
+        else:
+            cleanroom_input = st.text_input("Cleanroom Name", placeholder="e.g. mj_act_uc")
+    else:
+        cleanroom_input = st.text_input("Cleanroom Name", placeholder="e.g. mj_act_uc")
+
+    if st.button("Generate Plan", type="primary", use_container_width=True):
         if not cleanroom_input:
-            st.warning("Please enter a name.")
+            st.warning("Please enter a cleanroom name or select one from the list above.")
         else:
             with st.spinner("Analyzing environment..."):
                 plan = get_migration_plan(cleanroom_input.strip())
                 if plan:
                     st.session_state['plan'] = plan
-                    st.session_state['active_tab'] = "Execute Setup" # Reset workflow
+                    st.session_state['active_tab'] = "Execute Setup"
+                    st.session_state['collab_status'] = 'Not Started'
                     st.success("Plan Ready!")
 
 # Main Content
@@ -281,9 +347,9 @@ else:
                 
                 status = report.get('overall_status', 'UNKNOWN')
                 if status == "PASS":
-                    st.success("Validation Passed: Objects match.")
+                    st.success("Validation Passed: All objects match between legacy and new collaboration.")
                 else:
-                    st.error(f"Validation Failed: {status}")
+                    st.error(f"Validation Status: {status}")
                     if report.get('error'):
                         st.error(f"Error: {report.get('error')}")
                 
@@ -295,12 +361,19 @@ else:
                             "status": st.column_config.TextColumn("Status", width="small"),
                             "name": st.column_config.TextColumn("Check Name", width="medium"),
                             "details": st.column_config.TextColumn("Details", width="large"),
+                            "fix_hint": st.column_config.TextColumn("How to Fix", width="large"),
                         },
                         use_container_width=True
                     )
                 
                 if report.get('missing_objects'):
                     st.error(f"Missing Objects: {report.get('missing_objects')}")
+
+                remediation = report.get('remediation', [])
+                if remediation:
+                    with st.expander("Remediation Steps", expanded=True):
+                        for i, hint in enumerate(remediation, 1):
+                            st.markdown(f"**{i}.** {hint}")
 
     # 5. CLEANUP
     with tabs[4]:
