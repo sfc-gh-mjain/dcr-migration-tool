@@ -1177,34 +1177,97 @@ def agent_main(session, cleanroom_name, action_mode):
 
             if is_provider:
                 collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, [], tmp_ids, has_activation)
-                try:
-                    session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE", collab_yml)
-                    actions_taken.append(f"Created collaboration: {safe_collab_name}")
-                    actions_taken.append("Initialization complete. Proceed to Status Check.")
-                except Exception as e:
-                    if "already exists" in str(e).lower():
-                        actions_taken.append(f"Collaboration already exists (skipped): {safe_collab_name}")
-                    else: raise e
+                actions_taken.append(f"Generated collaboration spec for: {safe_collab_name}")
+                return json.dumps({
+                    "status": "SUCCESS",
+                    "message": f"Templates and data offerings registered for '{cleanroom_name}'.",
+                    "actions": actions_taken,
+                    "role": "PROVIDER",
+                    "collab_spec": collab_yml,
+                    "collab_name": safe_collab_name,
+                    "next_step": "INITIALIZE"
+                })
             else:
-                actions_taken.append("Consumer artifacts registered. Proceed to Review and Join.")
-
-            return json.dumps({
-                "status": "SUCCESS",
-                "message": f"Setup complete for '{cleanroom_name}'. Please verify status before joining.",
-                "actions": actions_taken,
-                "consumer_action_required": "None"
-            })
+                owner_acct = ""
+                try:
+                    cr_rec = session.sql(f"SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.CLEANROOM_RECORD WHERE UPPER(CLEANROOM_NAME) = '{cleanroom_name.upper()}'").collect()
+                    if cr_rec:
+                        cr_d = {k.upper(): v for k, v in cr_rec[0].as_dict().items()}
+                        for k, v in cr_d.items():
+                            if "PROVIDER" in k and "LOCATOR" in k and v:
+                                owner_acct = v
+                                break
+                except: pass
+                actions_taken.append("Consumer artifacts registered.")
+                return json.dumps({
+                    "status": "SUCCESS",
+                    "message": f"Consumer artifacts registered for '{cleanroom_name}'.",
+                    "actions": actions_taken,
+                    "role": "CONSUMER",
+                    "collab_name": safe_collab_name,
+                    "owner_account": owner_acct,
+                    "next_step": "REVIEW_AND_JOIN"
+                })
 
         elif action == 'CHECK_STATUS':
              try:
                  res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.GET_STATUS('{safe_collab_name}')").collect()
-                 status = "UNKNOWN"
-                 if res:
-                     row = {k.upper(): v for k, v in res[0].as_dict().items()}
-                     status = row.get('STATUS') or str(list(row.values())[0])
-                 return json.dumps({"status": "SUCCESS", "collaboration_status": status})
+                 overall_status = "UNKNOWN"
+                 collaborators = []
+                 error_details = []
+                 if res:v
+                     for r in res:
+                         rd = {k.upper(): v for k, v in r.as_dict().items()}
+                         c_name = rd.get('COLLABORATOR_NAME', '')
+                         c_status = rd.get('STATUS', '')
+                         c_roles = rd.get('COLLABORATOR_ROLES', rd.get('ROLES', ''))
+                         c_account = rd.get('COLLABORATOR_ACCOUNT', '')
+                         c_details = rd.get('DETAILS', '')
+                         detail_msg = ""
+                         if c_details:
+                             try:
+                                 d_parsed = json.loads(str(c_details)) if isinstance(c_details, str) else c_details
+                                 if isinstance(d_parsed, dict):
+                                     inner = d_parsed.get('details', d_parsed)
+                                     detail_msg = inner.get('message', str(inner))
+                                 else:
+                                     detail_msg = str(d_parsed)
+                             except:
+                                 detail_msg = str(c_details)
+                         collaborators.append({
+                             "name": c_name,
+                             "status": c_status,
+                             "roles": str(c_roles),
+                             "account": c_account,
+                             "details": detail_msg
+                         })
+                         if 'FAIL' in c_status.upper() and detail_msg:
+                             error_details.append(f"{c_name}: {detail_msg}")
+                     statuses = [c['status'] for c in collaborators]
+                     if 'JOINED' in statuses:
+                         overall_status = 'JOINED'
+                     elif 'CREATED' in statuses:
+                         overall_status = 'CREATED'
+                     elif any('FAIL' in s.upper() for s in statuses):
+                         failed = [s for s in statuses if 'FAIL' in s.upper()]
+                         overall_status = failed[0]
+                     elif statuses:
+                         overall_status = statuses[0]
+                 result = {"status": "SUCCESS", "collaboration_status": overall_status, "collaborators": collaborators}
+                 if 'FAIL' in overall_status.upper():
+                     if error_details:
+                         result["error_details"] = error_details
+                     if any('side effects' in d.lower() or 'accept_legal_terms' in d.lower() for d in error_details):
+                         result["hint"] = "INITIALIZE failed because it requires SYSTEM$ACCEPT_LEGAL_TERMS which cannot run inside a stored procedure. Please run the INITIALIZE and JOIN commands manually in a Snowflake worksheet. Use the generated script from the Review Plan tab."
+                     else:
+                         result["hint"] = "The collaboration creation failed. Check the error details above. You may need to teardown and re-create, or run the script manually in a worksheet."
+                 return json.dumps(result)
              except Exception as e:
-                 return json.dumps({"status": "ERROR", "message": str(e)})
+                 err = str(e)[:500]
+                 hint = ""
+                 if 'collaborationnotfoun' in err.lower() or 'not found' in err.lower():
+                     hint = "Collaboration not found. Run EXECUTE first to create it."
+                 return json.dumps({"status": "ERROR", "message": err, "hint": hint})
 
         elif action == 'JOIN':
              try:

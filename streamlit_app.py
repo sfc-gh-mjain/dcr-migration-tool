@@ -118,16 +118,45 @@ def execute_migration(cleanroom_name):
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
 
-def check_status(cleanroom_name):
+def initialize_collaboration(collab_spec):
+    """Call INITIALIZE directly from Streamlit (not inside a stored procedure)."""
     try:
-        res_str = session.call("DCR_SNOWVA.MIGRATION.AGENT_MIGRATE_ORCHESTRATOR", cleanroom_name, 'CHECK_STATUS')
-        return json.loads(res_str)
+        res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE($$ {collab_spec} $$)").collect()
+        collab_name = ""
+        msg = ""
+        if res:
+            rd = {k.upper(): v for k, v in res[0].as_dict().items()}
+            collab_name = rd.get('COLLABORATION_NAME', '')
+            msg = rd.get('MESSAGE', str(rd))
+        return {"status": "SUCCESS", "message": msg, "collaboration_name": collab_name}
+    except Exception as e:
+        err = str(e)
+        if "already exists" in err.lower():
+            return {"status": "SUCCESS", "message": "Collaboration already exists.", "already_exists": True}
+        return {"status": "ERROR", "message": err}
+
+def review_collaboration(collab_name, owner_account):
+    """Call REVIEW directly from Streamlit."""
+    try:
+        if owner_account:
+            session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW('{collab_name}', '{owner_account}')").collect()
+        else:
+            session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW('{collab_name}')").collect()
+        return {"status": "SUCCESS", "message": "Review complete."}
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
 
-def join_collaboration(cleanroom_name):
+def join_collaboration_direct(collab_name):
+    """Call JOIN directly from Streamlit (not inside a stored procedure)."""
     try:
-        res_str = session.call("DCR_SNOWVA.MIGRATION.AGENT_MIGRATE_ORCHESTRATOR", cleanroom_name, 'JOIN')
+        session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('{collab_name}')").collect()
+        return {"status": "SUCCESS", "message": "Join submitted. Check status to confirm."}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}
+
+def check_status(cleanroom_name):
+    try:
+        res_str = session.call("DCR_SNOWVA.MIGRATION.AGENT_MIGRATE_ORCHESTRATOR", cleanroom_name, 'CHECK_STATUS')
         return json.loads(res_str)
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
@@ -285,29 +314,45 @@ else:
         
         col1, col2 = st.columns([1, 2])
         if col1.button("Run Setup", type="primary"):
-            with st.spinner("Executing migration setup..."):
+            with st.spinner("Registering templates and data offerings..."):
                 res = execute_migration(cr_name)
-                if res.get("status") == "SUCCESS":
-                    st.success("Setup Complete!")
+            
+            if res.get("status") == "SUCCESS":
+                with st.expander("Registration Logs", expanded=True):
+                    if res.get("message"):
+                        st.info(res["message"])
+                    actions = res.get("actions", [])
+                    if actions:
+                        for act in actions:
+                            st.write(f"- {act}")
+                
+                collab_name = res.get("collab_name", "")
+                collab_spec = res.get("collab_spec", "")
+                role = res.get("role", "")
+                
+                if role == "PROVIDER" and collab_spec:
+                    with st.spinner("Initializing collaboration..."):
+                        init_res = initialize_collaboration(collab_spec)
+                    if init_res.get("status") == "SUCCESS":
+                        st.success(f"Collaboration initialized: {collab_name}")
+                        if init_res.get("already_exists"):
+                            st.info("Collaboration already existed.")
+                        st.session_state['setup_complete'] = True
+                        st.session_state['collab_name'] = collab_name
+                    else:
+                        st.error(f"Initialize failed: {init_res.get('message')}")
+                elif role == "CONSUMER":
+                    st.success("Consumer artifacts registered.")
                     st.session_state['setup_complete'] = True
-                    with st.expander("Execution Logs", expanded=True):
-                        if res.get("message"):
-                            st.info(res["message"])
-                        actions = res.get("actions", [])
-                        if actions:
-                            for act in actions:
-                                st.write(f"- {act}")
-                        else:
-                            st.caption("No detailed actions were logged.")
-                        if res.get("warnings"):
-                            for w in res["warnings"]:
-                                st.warning(w)
-                else:
-                    st.error(f"Setup Failed: {res.get('message')}")
-                    if res.get("actions"):
-                        with st.expander("Partial Execution Logs", expanded=True):
-                            for act in res["actions"]:
-                                st.write(f"- {act}")
+                    st.session_state['collab_name'] = collab_name
+                    st.session_state['owner_account'] = res.get("owner_account", "")
+                    st.info("Proceed to **Finalize** tab to Review and Join the collaboration.")
+            else:
+                st.error(f"Setup Failed: {res.get('message')}")
+                if res.get("actions"):
+                    with st.expander("Partial Execution Logs", expanded=True):
+                        for act in res["actions"]:
+                            st.write(f"- {act}")
 
     # 3. FINALIZE
     with tabs[2]:
@@ -318,32 +363,69 @@ else:
         col1, col2 = st.columns(2)
         
         # Check Status
-        if col1.button(" Check Status"):
+        if col1.button("Check Status"):
             with st.spinner("Checking Collaboration Status..."):
                 res = check_status(cr_name)
                 if res.get("status") == "SUCCESS":
-                    status = res.get("collaboration_status")
+                    status = res.get("collaboration_status", "UNKNOWN")
                     st.session_state['collab_status'] = status
                     if status == 'CREATED':
-                        st.success(f"Status: **{status}**")
+                        st.success(f"Status: **{status}** - Ready to Join!")
+                    elif status == 'JOINED':
+                        st.success(f"Status: **{status}** - Already joined. Proceed to Validate.")
+                    elif 'FAIL' in status.upper():
+                        st.error(f"Status: **{status}**")
+                        if res.get("hint"):
+                            st.warning(res["hint"])
+                    elif status == 'CREATING':
+                        st.info(f"Status: **{status}** - Still creating. Check again in a few seconds.")
                     else:
                         st.warning(f"Status: **{status}** (Wait for CREATED)")
+                    
+                    if res.get("error_details"):
+                        with st.expander("Error Details", expanded=True):
+                            for detail in res["error_details"]:
+                                st.error(detail)
+                    
+                    collaborators = res.get("collaborators", [])
+                    if collaborators:
+                        with st.expander("Collaborator Details"):
+                            for c in collaborators:
+                                status_icon = "+" if c['status'] in ('JOINED', 'CREATED') else "!" if 'FAIL' in c['status'].upper() else "-"
+                                line = f"- **{c['name']}** ({c['account']}): {c['status']}"
+                                if c.get('roles'):
+                                    line += f"  _Roles: {c['roles']}_"
+                                st.write(line)
+                                if c.get('details'):
+                                    st.caption(f"  Details: {c['details'][:500]}")
                 else:
                     st.error(f"Check Failed: {res.get('message')}")
+                    if res.get("hint"):
+                        st.info(res["hint"])
 
         # Join Button
-        is_ready = st.session_state.get('collab_status') == 'CREATED'
+        collab_status = st.session_state.get('collab_status', '')
+        is_ready = collab_status in ('CREATED', 'INVITED')
         btn_label = "Join Collaboration" if is_ready else "Join (Wait for CREATED)"
         
         if col2.button(btn_label, disabled=not is_ready, type="primary"):
-             with st.spinner("Joining..."):
-                 res = join_collaboration(cr_name)
+             collab_name = st.session_state.get('collab_name', plan.get('details', {}).get('target_collaboration', ''))
+             owner_account = st.session_state.get('owner_account', '')
+             role = plan.get('role', 'PROVIDER')
+             
+             if role == 'CONSUMER' and owner_account:
+                 with st.spinner("Reviewing collaboration..."):
+                     rev_res = review_collaboration(collab_name, owner_account)
+                     if rev_res.get("status") == "SUCCESS":
+                         st.info("Review complete.")
+                     else:
+                         st.warning(f"Review: {rev_res.get('message', 'Skipped or already reviewed.')}")
+             
+             with st.spinner("Joining collaboration..."):
+                 res = join_collaboration_direct(collab_name)
                  if res.get("status") == "SUCCESS":
                      st.success(res.get("message"))
                      st.balloons()
-                 elif res.get("status") == "WARNING":
-                     st.warning(res.get("message"))
-                     st.code(final_sql, language='sql')
                  else:
                      st.error(f"Join Failed: {res.get('message')}")
 
