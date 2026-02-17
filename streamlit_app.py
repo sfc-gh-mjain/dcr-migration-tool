@@ -404,6 +404,49 @@ else:
                     if res.get("hint"):
                         st.info(res["hint"])
 
+        # Join - must be done manually due to SYSTEM$ACCEPT_LEGAL_TERMS restriction
+        collab_name = st.session_state.get('collab_name', plan.get('details', {}).get('target_collaboration', ''))
+        owner_account = st.session_state.get('owner_account', '')
+        role = plan.get('role', 'PROVIDER')
+
+        st.divider()
+        st.subheader("Join Collaboration")
+        st.info(
+            "The **JOIN** command requires `SYSTEM$ACCEPT_LEGAL_TERMS` which cannot execute from Streamlit. "
+            "Please copy the SQL below and run it in a **Snowflake SQL Worksheet**."
+        )
+
+        # Build worksheet link
+        try:
+            acct_url = session.sql("SELECT CURRENT_ACCOUNT_URL()").collect()[0][0]
+            if acct_url:
+                ws_url = f"{acct_url.rstrip('/')}/#/worksheets"
+                st.markdown(f"[Open Snowflake Worksheets]({ws_url})")
+        except:
+            pass
+
+        st.markdown("""
+**Instructions:**
+1. Open a new SQL Worksheet in Snowflake (link above)
+2. Copy and paste the SQL below
+3. Make sure the role is set to **SAMOOHA_APP_ROLE** (the script sets it automatically)
+4. Run each statement sequentially
+""")
+
+        join_sql_lines = ["-- Run this in a Snowflake SQL Worksheet"]
+        join_sql_lines.append("USE ROLE SAMOOHA_APP_ROLE;")
+        join_sql_lines.append("USE SECONDARY ROLES NONE;")
+        if role == 'CONSUMER' and owner_account:
+            join_sql_lines.append(f"\n-- Step 1: Review the collaboration")
+            join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.review('{collab_name}', '{owner_account}');")
+            join_sql_lines.append(f"\n-- Step 2: Join the collaboration")
+        else:
+            join_sql_lines.append(f"\n-- Join the collaboration (status must be CREATED)")
+        join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{collab_name}');")
+        join_sql_lines.append(f"\n-- Step 3: Verify join status (wait for JOINED)")
+        join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.get_status('{collab_name}');")
+
+        st.code("\n".join(join_sql_lines), language='sql')
         # Join Button
         collab_status = st.session_state.get('collab_status', '')
         is_ready = collab_status in ('CREATED', 'INVITED')
@@ -431,7 +474,7 @@ else:
                      st.error(f"Join Failed: {res.get('message')}")
 
         st.divider()
-        with st.expander("View Manual SQL Commands"):
+        with st.expander("View Full Manual SQL Script"):
             st.code(final_sql, language='sql')
 
     # 4. VALIDATE
