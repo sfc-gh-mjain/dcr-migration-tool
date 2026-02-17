@@ -623,7 +623,7 @@ def gen_collab(session, cleanroom_name, prov_ids, cons_ids, temp_ids, enable_act
         runner_config = {
             'templates': [{'id': x} for x in temp_ids]
         }
-        runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}} if prov_ids else {}
+        runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}}
         if enable_activation:
             runner_config['activation_destinations'] = {'snowflake_collaborators': ['Provider_Account']}
         runners['Provider_Account'] = runner_config
@@ -631,7 +631,7 @@ def gen_collab(session, cleanroom_name, prov_ids, cons_ids, temp_ids, enable_act
         cons_runner_config = {
             'templates': [{'id': x} for x in temp_ids]
         }
-        cons_runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}} if prov_ids else {}
+        cons_runner_config['data_providers'] = {'Provider_Account': {'data_offerings': [{'id': x} for x in prov_ids]}}
         if enable_activation:
             cons_runner_config['activation_destinations'] = {'snowflake_collaborators': ['Consumer_Account']}
         runners['Consumer_Account'] = cons_runner_config
