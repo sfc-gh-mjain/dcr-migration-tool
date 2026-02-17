@@ -447,6 +447,31 @@ else:
         join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.get_status('{collab_name}');")
 
         st.code("\n".join(join_sql_lines), language='sql')
+        # Join Button
+        collab_status = st.session_state.get('collab_status', '')
+        is_ready = collab_status in ('CREATED', 'INVITED')
+        btn_label = "Join Collaboration" if is_ready else "Join (Wait for CREATED)"
+        
+        if col2.button(btn_label, disabled=not is_ready, type="primary"):
+             collab_name = st.session_state.get('collab_name', plan.get('details', {}).get('target_collaboration', ''))
+             owner_account = st.session_state.get('owner_account', '')
+             role = plan.get('role', 'PROVIDER')
+             
+             if role == 'CONSUMER' and owner_account:
+                 with st.spinner("Reviewing collaboration..."):
+                     rev_res = review_collaboration(collab_name, owner_account)
+                     if rev_res.get("status") == "SUCCESS":
+                         st.info("Review complete.")
+                     else:
+                         st.warning(f"Review: {rev_res.get('message', 'Skipped or already reviewed.')}")
+             
+             with st.spinner("Joining collaboration..."):
+                 res = join_collaboration_direct(collab_name)
+                 if res.get("status") == "SUCCESS":
+                     st.success(res.get("message"))
+                     st.balloons()
+                 else:
+                     st.error(f"Join Failed: {res.get('message')}")
 
         st.divider()
         with st.expander("View Full Manual SQL Script"):
