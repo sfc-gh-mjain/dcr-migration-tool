@@ -790,18 +790,41 @@ def validate(session, cleanroom_name, collab_name):
                     break
         except: pass
 
+        collab_ready = False
         try:
             res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.GET_STATUS('{collab_name}')").collect()
             if res:
-                status_val = str(list(res[0].as_dict().values())[0])
-                log_step("Collaboration Status", "PASS", f"Current Status: {status_val}")
+                statuses = {}
+                for r in res:
+                    rd = {k.upper(): v for k, v in r.as_dict().items()}
+                    name = rd.get('COLLABORATOR_NAME', '')
+                    st = rd.get('STATUS', '')
+                    statuses[name] = st
+                status_summary = ", ".join([f"{k}={v}" for k, v in statuses.items()])
+                joined_statuses = {'JOINED', 'CREATED'}
+                if any(s in joined_statuses for s in statuses.values()):
+                    log_step("Collaboration Status", "PASS", f"Collaborator statuses: {status_summary}")
+                    collab_ready = True
+                else:
+                    log_step("Collaboration Status", "FAIL",
+                        f"No collaborator has joined yet. Statuses: {status_summary}",
+                        f"You must JOIN the collaboration before running validation. VIEW_TEMPLATES and VIEW_DATA_OFFERINGS require a joined state.")
             else:
                 log_step("Collaboration Status", "FAIL", "Collaboration not found.",
-                    f"Run the migration EXECUTE step first, or check that '{collab_name}' was initialized successfully.")
+                    f"Run the migration EXECUTE step first, then JOIN, then validate.")
         except Exception as e:
             err_msg = str(e)[:300]
-            log_step("Collaboration Status", "FAIL", err_msg,
-                f"Collaboration '{collab_name}' may not exist. Ensure the EXECUTE step completed without errors. Check: CALL samooha_by_snowflake_local_db.collaboration.get_status('{collab_name}');")
+            if 'collaborationnotfoun' in err_msg.lower() or 'not found' in err_msg.lower():
+                log_step("Collaboration Status", "FAIL",
+                    f"Collaboration '{collab_name}' does not exist.",
+                    f"Run the EXECUTE step first to create the collaboration, then JOIN it, then validate.")
+            else:
+                log_step("Collaboration Status", "FAIL", err_msg,
+                    f"Check: CALL samooha_by_snowflake_local_db.collaboration.get_status('{collab_name}');")
+
+        if not collab_ready:
+            report['remediation'].append("Validation requires the collaboration to exist and at least one collaborator to have joined. Complete the EXECUTE and JOIN steps first.")
+            return report
 
         if is_provider:
             try:
@@ -1057,9 +1080,10 @@ def agent_main(session, cleanroom_name, action_mode):
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.get_status('{safe_collab_name}');\n")
              script_lines.append(f"-- [4] JOIN COLLABORATION (Self-Join for Provider)")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}');\n")
-             script_lines.append(f"-- [5] CONSUMER: After joining, the consumer should register their data offerings")
-             script_lines.append(f"-- and add them to the collaboration using:")
-             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.add_data_offering('<collab_name>', '<data_offering_id>');")
+             script_lines.append(f"-- [5] CONSUMER: After reviewing and joining, the consumer should register their data offerings")
+             script_lines.append(f"-- and link them to the collaboration using:")
+             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.registry.register_data_offering($$<data_offering_spec>$$);")
+             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.link_local_data_offering('{safe_collab_name}', '<data_offering_id>');")
         else:
              if not tmps and not dos:
                  script_lines.append(f"\n-- NOTE: No templates or data offerings found on the consumer side.")
@@ -1070,17 +1094,34 @@ def agent_main(session, cleanroom_name, action_mode):
                  script_lines.append(f"\n-- [2.5] REGISTER CONSUMER DATA OFFERINGS AFTER JOIN")
                  script_lines.append(f"-- Register your data offerings first, then add them to the collaboration after joining.\n")
 
-             script_lines.append(f"\n-- [3] REVIEW COLLABORATION")
-             script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.review('{safe_collab_name}');\n")
+             owner_acct = "REPLACE_WITH_PROVIDER_ORG.ACCOUNT"
+             try:
+                 cr_rec = session.sql(f"SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.CLEANROOM_RECORD WHERE UPPER(CLEANROOM_NAME) = '{cleanroom_name.upper()}'").collect()
+                 if cr_rec:
+                     cr_d = {k.upper(): v for k, v in cr_rec[0].as_dict().items()}
+                     for k, v in cr_d.items():
+                         if "PROVIDER" in k and "LOCATOR" in k and v:
+                             owner_acct = v
+                             break
+             except: pass
+             if owner_acct == "REPLACE_WITH_PROVIDER_ORG.ACCOUNT":
+                 try:
+                     curr_org = session.sql("SELECT CURRENT_ORGANIZATION_NAME()").collect()[0][0]
+                     owner_acct = f"{curr_org}.REPLACE_WITH_PROVIDER_ACCOUNT"
+                 except: pass
+
+             script_lines.append(f"\n-- [3] REVIEW COLLABORATION (requires owner account identifier)")
+             script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.review('{safe_collab_name}', '{owner_acct}');\n")
              script_lines.append(f"-- [4] JOIN COLLABORATION")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}');\n")
 
              if dos:
-                 script_lines.append(f"-- [5] ADD CONSUMER DATA OFFERINGS (run after join)")
+                 script_lines.append(f"-- [5] LINK CONSUMER DATA OFFERINGS (run after join)")
+                 script_lines.append(f"-- First register each data offering, then link it to the collaboration:")
                  for y_str in dos:
                      spec = yaml.safe_load(y_str)
                      do_id = f"{spec['name']}_{spec['version']}"
-                     script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.add_data_offering('{safe_collab_name}', '{do_id}');\n")
+                     script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.link_local_data_offering('{safe_collab_name}', '{do_id}');\n")
 
         full_script_text = "\n".join(script_lines)
 
@@ -1168,7 +1209,20 @@ def agent_main(session, cleanroom_name, action_mode):
                  msg = []
                  if role_type == 'CONSUMER':
                      try:
-                        session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW", safe_collab_name)
+                        owner_acct = None
+                        try:
+                            cr_rec = session.sql(f"SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.CLEANROOM_RECORD WHERE UPPER(CLEANROOM_NAME) = '{cleanroom_name.upper()}'").collect()
+                            if cr_rec:
+                                cr_d = {k.upper(): v for k, v in cr_rec[0].as_dict().items()}
+                                for k, v in cr_d.items():
+                                    if "PROVIDER" in k and "LOCATOR" in k and v:
+                                        owner_acct = v
+                                        break
+                        except: pass
+                        if owner_acct:
+                            session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW", safe_collab_name, owner_acct)
+                        else:
+                            session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW", safe_collab_name)
                         msg.append("Reviewed")
                      except: pass
                  
