@@ -1016,6 +1016,7 @@ def agent_main(session, cleanroom_name, action_mode):
 
         script_lines = []
         script_lines.append("USE ROLE SAMOOHA_APP_ROLE;")
+        script_lines.append("USE SECONDARY ROLES NONE;")
         script_lines.append(f"-- MIGRATION SCRIPT FOR: {cleanroom_name} ({role_type})")
         script_lines.append("-- Generated via DCR_SNOWVA.MIGRATION Package\n")
 

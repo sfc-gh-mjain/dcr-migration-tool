@@ -119,11 +119,10 @@ def execute_migration(cleanroom_name):
         return {"status": "ERROR", "message": str(e)}
 
 def initialize_collaboration(collab_spec):
-    """Call INITIALIZE directly from Streamlit (works from Streamlit)."""
+    """Call INITIALIZE directly from Streamlit (not inside a stored procedure)."""
     try:
         spec = collab_spec.strip()
-        dd = "$" + "$"
-        res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE({dd}\n{spec}\n{dd})").collect()
+        res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE($$\n{spec}\n$$)").collect()
         collab_name = ""
         msg = ""
         if res:
@@ -137,21 +136,24 @@ def initialize_collaboration(collab_spec):
             return {"status": "SUCCESS", "message": "Collaboration already exists.", "already_exists": True}
         return {"status": "ERROR", "message": err}
 
-def build_join_sql(collab_name):
-    """Build the JOIN SQL for the user to run in a worksheet (JOIN requires SYSTEM$ACCEPT_LEGAL_TERMS)."""
-    sql = f"USE ROLE SAMOOHA_APP_ROLE;\n\n"
-    sql += f"-- JOIN requires running in a Snowflake worksheet (cannot run from Streamlit)\n"
-    sql += f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('{collab_name}');\n"
-    return sql
+def review_collaboration(collab_name, owner_account):
+    """Call REVIEW directly from Streamlit."""
+    try:
+        if owner_account:
+            session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW('{collab_name}', '{owner_account}')").collect()
+        else:
+            session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW('{collab_name}')").collect()
+        return {"status": "SUCCESS", "message": "Review complete."}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}
 
-def build_consumer_join_sql(collab_name, owner_account):
-    """Build the REVIEW + JOIN SQL commands for consumer to run in a worksheet."""
-    sql = f"USE ROLE SAMOOHA_APP_ROLE;\n\n"
-    sql += f"-- Step 1: Review the collaboration\n"
-    sql += f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.REVIEW('{collab_name}', '{owner_account}');\n\n"
-    sql += f"-- Step 2: Join the collaboration\n"
-    sql += f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('{collab_name}');\n"
-    return sql
+def join_collaboration_direct(collab_name):
+    """Call JOIN directly from Streamlit (not inside a stored procedure)."""
+    try:
+        session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN('{collab_name}')").collect()
+        return {"status": "SUCCESS", "message": "Join submitted. Check status to confirm."}
+    except Exception as e:
+        return {"status": "ERROR", "message": str(e)}
 
 def check_status(cleanroom_name):
     try:
@@ -328,28 +330,24 @@ else:
                 collab_name = res.get("collab_name", "")
                 collab_spec = res.get("collab_spec", "")
                 role = res.get("role", "")
-                owner_account = res.get("owner_account", "")
-                
-                st.session_state['collab_name'] = collab_name
                 
                 if role == "PROVIDER" and collab_spec:
                     with st.spinner("Initializing collaboration..."):
                         init_res = initialize_collaboration(collab_spec)
                     if init_res.get("status") == "SUCCESS":
-                        st.success(f"Collaboration initialized: **{collab_name}**")
+                        st.success(f"Collaboration initialized: {collab_name}")
                         if init_res.get("already_exists"):
                             st.info("Collaboration already existed.")
                         st.session_state['setup_complete'] = True
-                        st.warning("Now run the JOIN command below in a **Snowflake worksheet** (JOIN cannot run from Streamlit).")
-                        st.code(build_join_sql(collab_name), language='sql')
+                        st.session_state['collab_name'] = collab_name
                     else:
                         st.error(f"Initialize failed: {init_res.get('message')}")
                 elif role == "CONSUMER":
                     st.success("Consumer artifacts registered.")
                     st.session_state['setup_complete'] = True
-                    st.session_state['owner_account'] = owner_account
-                    st.warning("Now run the commands below in a **Snowflake worksheet** to review and join.")
-                    st.code(build_consumer_join_sql(collab_name, owner_account), language='sql')
+                    st.session_state['collab_name'] = collab_name
+                    st.session_state['owner_account'] = res.get("owner_account", "")
+                    st.info("Proceed to **Finalize** tab to Review and Join the collaboration.")
             else:
                 st.error(f"Setup Failed: {res.get('message')}")
                 if res.get("actions"):
@@ -363,8 +361,10 @@ else:
         
         final_sql, _ = get_manual_sql_scripts(plan)
         
+        col1, col2 = st.columns(2)
+        
         # Check Status
-        if st.button("Check Status"):
+        if col1.button("Check Status"):
             with st.spinner("Checking Collaboration Status..."):
                 res = check_status(cr_name)
                 if res.get("status") == "SUCCESS":
@@ -404,10 +404,52 @@ else:
                     if res.get("hint"):
                         st.info(res["hint"])
 
-        st.caption("After running INITIALIZE and JOIN in a worksheet, use **Check Status** to verify.")
+        # Join - must be done manually due to SYSTEM$ACCEPT_LEGAL_TERMS restriction
+        collab_name = st.session_state.get('collab_name', plan.get('details', {}).get('target_collaboration', ''))
+        owner_account = st.session_state.get('owner_account', '')
+        role = plan.get('role', 'PROVIDER')
 
         st.divider()
-        with st.expander("View Manual SQL Commands"):
+        st.subheader("Join Collaboration")
+        st.info(
+            "The **JOIN** command requires `SYSTEM$ACCEPT_LEGAL_TERMS` which cannot execute from Streamlit. "
+            "Please copy the SQL below and run it in a **Snowflake SQL Worksheet**."
+        )
+
+        # Build worksheet link
+        try:
+            acct_url = session.sql("SELECT CURRENT_ACCOUNT_URL()").collect()[0][0]
+            if acct_url:
+                ws_url = f"{acct_url.rstrip('/')}/#/worksheets"
+                st.markdown(f"[Open Snowflake Worksheets]({ws_url})")
+        except:
+            pass
+
+        st.markdown("""
+**Instructions:**
+1. Open a new SQL Worksheet in Snowflake (link above)
+2. Copy and paste the SQL below
+3. Make sure the role is set to **SAMOOHA_APP_ROLE** (the script sets it automatically)
+4. Run each statement sequentially
+""")
+
+        join_sql_lines = ["-- Run this in a Snowflake SQL Worksheet"]
+        join_sql_lines.append("USE ROLE SAMOOHA_APP_ROLE;")
+        join_sql_lines.append("USE SECONDARY ROLES NONE;")
+        if role == 'CONSUMER' and owner_account:
+            join_sql_lines.append(f"\n-- Step 1: Review the collaboration")
+            join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.review('{collab_name}', '{owner_account}');")
+            join_sql_lines.append(f"\n-- Step 2: Join the collaboration")
+        else:
+            join_sql_lines.append(f"\n-- Join the collaboration (status must be CREATED)")
+        join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{collab_name}');")
+        join_sql_lines.append(f"\n-- Step 3: Verify join status (wait for JOINED)")
+        join_sql_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.get_status('{collab_name}');")
+
+        st.code("\n".join(join_sql_lines), language='sql')
+
+        st.divider()
+        with st.expander("View Full Manual SQL Script"):
             st.code(final_sql, language='sql')
 
     # 4. VALIDATE
