@@ -290,11 +290,24 @@ else:
                 if res.get("status") == "SUCCESS":
                     st.success("Setup Complete!")
                     st.session_state['setup_complete'] = True
-                    with st.expander("Execution Logs"):
-                        for act in res.get("actions", []):
-                            st.write(f"- {act}")
+                    with st.expander("Execution Logs", expanded=True):
+                        if res.get("message"):
+                            st.info(res["message"])
+                        actions = res.get("actions", [])
+                        if actions:
+                            for act in actions:
+                                st.write(f"- {act}")
+                        else:
+                            st.caption("No detailed actions were logged.")
+                        if res.get("warnings"):
+                            for w in res["warnings"]:
+                                st.warning(w)
                 else:
                     st.error(f"Setup Failed: {res.get('message')}")
+                    if res.get("actions"):
+                        with st.expander("Partial Execution Logs", expanded=True):
+                            for act in res["actions"]:
+                                st.write(f"- {act}")
 
     # 3. FINALIZE
     with tabs[2]:

@@ -1082,7 +1082,7 @@ def agent_main(session, cleanroom_name, action_mode):
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}');\n")
              script_lines.append(f"-- [5] CONSUMER: After reviewing and joining, the consumer should register their data offerings")
              script_lines.append(f"-- and link them to the collaboration using:")
-             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.registry.register_data_offering($$<data_offering_spec>$$);")
+             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.registry.register_data_offering(<data_offering_spec>);")
              script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.link_local_data_offering('{safe_collab_name}', '<data_offering_id>');")
         else:
              if not tmps and not dos:
@@ -1148,32 +1148,45 @@ def agent_main(session, cleanroom_name, action_mode):
             if tmps:
                 for y_str in tmps:
                     try:
+                        spec = yaml.safe_load(y_str)
+                        t_name = spec.get('name', 'unknown')
+                    except:
+                        t_name = 'unknown'
+                    try:
                         session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.REGISTRY.REGISTER_TEMPLATE", y_str)
-                        actions_taken.append("Registered template")
+                        actions_taken.append(f"Registered template: {t_name}")
                     except Exception as e:
-                        if "already exists" in str(e).lower(): pass
+                        if "already exists" in str(e).lower():
+                            actions_taken.append(f"Template already registered (skipped): {t_name}")
                         else: raise e
             
             if dos:
                 for y_str in dos:
                     try:
+                        spec = yaml.safe_load(y_str)
+                        do_name = spec.get('name', 'unknown')
+                    except:
+                        do_name = 'unknown'
+                    try:
                         session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.REGISTRY.REGISTER_DATA_OFFERING", y_str)
-                        actions_taken.append("Registered data offering")
+                        actions_taken.append(f"Registered data offering: {do_name}")
                     except Exception as e:
-                        if "already exists" in str(e).lower(): pass
+                        if "already exists" in str(e).lower():
+                            actions_taken.append(f"Data offering already registered (skipped): {do_name}")
                         else: raise e
 
             if is_provider:
                 collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, [], tmp_ids, has_activation)
                 try:
                     session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.INITIALIZE", collab_yml)
-                    actions_taken.append(f"Created collaboration '{safe_collab_name}'")
+                    actions_taken.append(f"Created collaboration: {safe_collab_name}")
                     actions_taken.append("Initialization complete. Proceed to Status Check.")
                 except Exception as e:
-                    if "already exists" in str(e).lower(): pass
+                    if "already exists" in str(e).lower():
+                        actions_taken.append(f"Collaboration already exists (skipped): {safe_collab_name}")
                     else: raise e
             else:
-                actions_taken.append("Artifacts registered. Proceed to Status Check and Join.")
+                actions_taken.append("Consumer artifacts registered. Proceed to Review and Join.")
 
             return json.dumps({
                 "status": "SUCCESS",
