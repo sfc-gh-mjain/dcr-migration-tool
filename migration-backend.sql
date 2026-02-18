@@ -322,7 +322,7 @@ def gen_templates(session, cleanroom_name):
                     params = []
             except: pass
 
-        system_vars = ['source_table', 'my_table', 'consumer_table', 'provider_table', 'dimensions', 'measures']
+        system_vars = ['source_table', 'source_tables', 'my_table', 'my_tables']
         existing_param_names = set()
         if params:
             for p in params:
@@ -451,6 +451,8 @@ def gen_data_offerings(session, cleanroom_name):
     join_df = pd.DataFrame()
     col_df = pd.DataFrame()
     act_df = pd.DataFrame()
+    prov_join_df = pd.DataFrame()
+    prov_col_df = pd.DataFrame()
 
     if is_provider:
         prov_res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.view_provider_datasets('{cleanroom_name}')").collect()
@@ -483,9 +485,17 @@ def gen_data_offerings(session, cleanroom_name):
                 if t_name:
                     tables_data.append({'TABLE_NAME': t_name, 'SQL_ENABLED': False})
         
-        join_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_join_policy('{cleanroom_name}')")
-        col_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_column_policy('{cleanroom_name}')")
+        try:
+            join_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_join_policy('{cleanroom_name}')")
+        except: pass
+        try:
+            col_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_column_policy('{cleanroom_name}')")
+        except: pass
         try: act_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_activation_policy('{cleanroom_name}')")
+        except: pass
+        try:
+            prov_join_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_provider_join_policy('{cleanroom_name}')")
+            prov_col_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_provider_column_policy('{cleanroom_name}')")
         except: pass
 
     if not tables_data: return []
@@ -493,39 +503,78 @@ def gen_data_offerings(session, cleanroom_name):
     specs = []
     ver_str = "MIGRATION_V1"
 
+    def table_matches(policy_table, target_table):
+        if not policy_table or not target_table:
+            return False
+        pt = policy_table.upper().strip()
+        tt = target_table.upper().strip()
+        if pt == tt:
+            return True
+        if pt.split('.')[-1] == tt.split('.')[-1]:
+            return True
+        if tt.endswith(pt) or pt.endswith(tt):
+            return True
+        return False
+
+    def find_table_col(df):
+        for c in ['TABLE_NAME', 'DATASET_NAME', 'TABLE', 'OBJECT_NAME']:
+            if c in df.columns:
+                return c
+        return None
+
+    def find_col_col(df):
+        for c in ['COLUMN_NAME', 'COLUMN', 'COL_NAME']:
+            if c in df.columns:
+                return c
+        return None
+
     for t_data in tables_data:
         t_name = t_data['TABLE_NAME']
         if not t_name or "TEMP_PUBLIC_KEY" in t_name: continue
         
         schema_policies = {}
-        if not join_df.empty:
-             t_col = 'TABLE_NAME' if 'TABLE_NAME' in join_df.columns else 'DATASET_NAME'
-             if t_col in join_df.columns:
-                 for _, row in join_df.iterrows():
-                     j_table = str(row.get(t_col, ''))
-                     if j_table and j_table.split('.')[-1].upper() == t_name.split('.')[-1].upper():
-                         cname = row['COLUMN_NAME']
-                         gtype = guess_type(cname)
-                         gtype = refine_type_by_data(t_name, cname, gtype)
-                         schema_policies[cname] = {'category': 'join_standard', 'column_type': gtype if gtype else 'MANUAL_REVIEW'}
 
-        if not col_df.empty:
-             t_col = 'TABLE_NAME' if 'TABLE_NAME' in col_df.columns else 'DATASET_NAME'
-             if t_col in col_df.columns:
-                 for _, row in col_df.iterrows():
-                     c_table = str(row.get(t_col, ''))
-                     if c_table and c_table.split('.')[-1].upper() == t_name.split('.')[-1].upper():
-                         cname = row['COLUMN_NAME']
-                         if cname not in schema_policies: schema_policies[cname] = {'category': 'passthrough'}
+        for policy_df, policy_type in [(join_df, 'join'), (prov_join_df, 'join')]:
+            if policy_df.empty:
+                continue
+            tc = find_table_col(policy_df)
+            cc = find_col_col(policy_df)
+            if not tc or not cc:
+                continue
+            for _, row in policy_df.iterrows():
+                j_table = str(row.get(tc, ''))
+                if table_matches(j_table, t_name):
+                    cname = str(row[cc])
+                    if cname not in schema_policies:
+                        gtype = guess_type(cname)
+                        gtype = refine_type_by_data(t_name, cname, gtype)
+                        schema_policies[cname] = {'category': 'join_standard', 'column_type': gtype if gtype else 'MANUAL_REVIEW'}
+
+        for policy_df in [col_df, prov_col_df]:
+            if policy_df.empty:
+                continue
+            tc = find_table_col(policy_df)
+            cc = find_col_col(policy_df)
+            if not tc or not cc:
+                continue
+            for _, row in policy_df.iterrows():
+                c_table = str(row.get(tc, ''))
+                if table_matches(c_table, t_name):
+                    cname = str(row[cc])
+                    if cname not in schema_policies:
+                        schema_policies[cname] = {'category': 'passthrough'}
 
         if not act_df.empty:
-             t_col = 'TABLE_NAME' if 'TABLE_NAME' in act_df.columns else 'DATASET_NAME'
-             if t_col in act_df.columns:
-                 act_subset = act_df[act_df[t_col] == t_name]
-                 for _, row in act_subset.iterrows():
-                     cname = row['COLUMN_NAME']
-                     if cname not in schema_policies: schema_policies[cname] = {'category': 'passthrough'}
-                     schema_policies[cname]['activation_allowed'] = True
+            tc = find_table_col(act_df)
+            cc = find_col_col(act_df)
+            if tc and cc:
+                for _, row in act_df.iterrows():
+                    a_table = str(row.get(tc, ''))
+                    if table_matches(a_table, t_name):
+                        cname = str(row[cc])
+                        if cname not in schema_policies:
+                            schema_policies[cname] = {'category': 'passthrough'}
+                        schema_policies[cname]['activation_allowed'] = True
                      
         if not schema_policies:
             try:
@@ -1083,6 +1132,13 @@ def agent_main(session, cleanroom_name, action_mode):
                              except: pass
                  except: pass
 
+             is_prov_run = False
+             try:
+                 pr_res = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.LIBRARY.IS_PROVIDER_RUN_ENABLED('{cleanroom_name}')").collect()
+                 if pr_res and "provider side run analysis is enabled" in str(pr_res[0][0]).lower():
+                     is_prov_run = True
+             except: pass
+
              collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, [], tmp_ids, has_activation)
 
              script_lines.append(f"\n-- [3] CREATE COLLABORATION: {safe_collab_name}")
@@ -1091,19 +1147,22 @@ def agent_main(session, cleanroom_name, action_mode):
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.get_status('{safe_collab_name}');\n")
              script_lines.append(f"-- [4] JOIN COLLABORATION (Self-Join for Provider)")
              script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}');\n")
-             script_lines.append(f"-- [5] CONSUMER: After reviewing and joining, the consumer should register their data offerings")
-             script_lines.append(f"-- and link them to the collaboration using:")
+             if is_prov_run:
+                 script_lines.append(f"-- [5] PROVIDER-RUN ANALYSIS DETECTED")
+                 script_lines.append(f"-- This legacy cleanroom has provider-run analysis enabled.")
+                 script_lines.append(f"-- The consumer MUST run their own migration to register data offerings with policies,")
+                 script_lines.append(f"-- then link them to this collaboration after joining.")
+                 script_lines.append(f"-- Consumer data offerings are listed as empty in the collaboration spec above")
+                 script_lines.append(f"-- because the provider cannot see consumer datasets.\n")
+             script_lines.append(f"-- CONSUMER: After reviewing and joining, the consumer should register their data offerings")
+             script_lines.append(f"-- and link them to the collaboration to update the spec:")
              script_lines.append(f"-- CALL samooha_by_snowflake_local_db.registry.register_data_offering(<data_offering_spec>);")
-             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.link_local_data_offering('{safe_collab_name}', '<data_offering_id>');")
+             script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.link_data_offering('{safe_collab_name}', '<data_offering_id>', ['Provider_Account']);")
         else:
              if not tmps and not dos:
                  script_lines.append(f"\n-- NOTE: No templates or data offerings found on the consumer side.")
                  script_lines.append(f"-- The provider must run migration first to create the collaboration.")
                  script_lines.append(f"-- Once the collaboration is created, run the following steps:\n")
-
-             if dos:
-                 script_lines.append(f"\n-- [2.5] REGISTER CONSUMER DATA OFFERINGS AFTER JOIN")
-                 script_lines.append(f"-- Register your data offerings first, then add them to the collaboration after joining.\n")
 
              owner_acct = "REPLACE_WITH_PROVIDER_ORG.ACCOUNT"
              try:
@@ -1128,11 +1187,12 @@ def agent_main(session, cleanroom_name, action_mode):
 
              if dos:
                  script_lines.append(f"-- [5] LINK CONSUMER DATA OFFERINGS (run after join)")
-                 script_lines.append(f"-- First register each data offering, then link it to the collaboration:")
+                 script_lines.append(f"-- link_data_offering shares your data with the specified analysis runner")
+                 script_lines.append(f"-- and updates the collaboration spec. This enables policy enforcement.\n")
                  for y_str in dos:
                      spec = yaml.safe_load(y_str)
                      do_id = f"{spec['name']}_{spec['version']}"
-                     script_lines.append(f"-- CALL samooha_by_snowflake_local_db.collaboration.link_local_data_offering('{safe_collab_name}', '{do_id}');\n")
+                     script_lines.append(f"CALL samooha_by_snowflake_local_db.collaboration.link_data_offering('{safe_collab_name}', '{do_id}', ['Provider_Account']);\n")
 
         full_script_text = "\n".join(script_lines)
 
