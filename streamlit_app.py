@@ -297,6 +297,9 @@ else:
     m3.metric("Data Offerings", len(details.get('provider_data', [])))
     m4.metric("Status", st.session_state.get('collab_status', 'Not Started'))
 
+    if role == 'CONSUMER' and not details.get('provider_data'):
+        st.warning("No consumer data offerings were detected. Ensure you have linked datasets and set join/column policies on the legacy cleanroom before migrating.")
+
     st.divider()
 
     # Tabs
