@@ -416,7 +416,7 @@ else:
             "Please copy the SQL below and run it in a **Snowflake SQL Worksheet**."
         )
 
-        # Build worksheet link - try multiple methods
+        # Build worksheet link with multiple fallback strategies
         ws_url = None
         try:
             acct_url = session.sql("SELECT CURRENT_ACCOUNT_URL()").collect()[0][0]
@@ -434,20 +434,24 @@ else:
             except:
                 pass
 
+        if not ws_url:
+            try:
+                locator = session.sql("SELECT CURRENT_ACCOUNT()").collect()[0][0]
+                region = session.sql("SELECT CURRENT_REGION()").collect()[0][0]
+                if locator and region:
+                    region_lower = region.lower().replace('_', '-')
+                    ws_url = f"https://{locator.lower()}.{region_lower}.snowflakecomputing.com/console#/internal/worksheet"
+            except:
+                pass
+
         if ws_url:
             st.markdown(f"**[Open Snowflake Worksheets]({ws_url})**")
-            st.markdown("""
+        else:
+            st.markdown("**[Open Snowflake](https://app.snowflake.com)** and navigate to **Worksheets**.")
+
+        st.markdown("""
 **Instructions:**
 1. Open a new SQL Worksheet in Snowflake using the link above
-2. Copy and paste the SQL below
-3. Make sure the role is set to **SAMOOHA_APP_ROLE** (the script sets it automatically)
-4. Run each statement sequentially
-""")
-        else:
-            st.warning("Could not generate a direct link to Snowflake Worksheets. Please open your Snowflake account manually.")
-            st.markdown("""
-**Instructions:**
-1. Log in to your Snowflake account and open a new **SQL Worksheet**
 2. Copy and paste the SQL below
 3. Make sure the role is set to **SAMOOHA_APP_ROLE** (the script sets it automatically)
 4. Run each statement sequentially
