@@ -231,6 +231,16 @@ import re
 from datetime import datetime
 import json
 
+class LiteralBlockDumper(yaml.SafeDumper):
+    pass
+
+def _literal_str_representer(dumper, data):
+    if '\n' in data:
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
+LiteralBlockDumper.add_representer(str, _literal_str_representer)
+
 def gen_templates(session, cleanroom_name):
     # --- ROLE DETECTION ---
     is_provider = False
@@ -343,7 +353,7 @@ def gen_templates(session, cleanroom_name):
             'parameters': params, 
             'template': cleaned_sql
         }
-        specs.append(yaml.dump(spec_dict))
+        specs.append(yaml.dump(spec_dict, Dumper=LiteralBlockDumper, default_flow_style=False, sort_keys=False))
     return specs
 $$;
 
@@ -545,7 +555,7 @@ def gen_data_offerings(session, cleanroom_name):
             'version': ver_str, 'description': f"Migrated {t_name}",
             'datasets': [dataset_obj]
         }
-        specs.append(yaml.dump(spec))
+        specs.append(yaml.dump(spec, default_flow_style=False, sort_keys=False))
     return specs
 $$;
 
