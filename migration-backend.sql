@@ -193,17 +193,45 @@ def preview(session, cleanroom_name):
         elif is_consumer:
             cons_ds = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_consumer_datasets('{cleanroom_name}')")
             if not cons_ds.empty:
-                t_col = 'TABLE_NAME' if 'TABLE_NAME' in cons_ds.columns else 'VIEW_NAME'
-                if t_col in cons_ds.columns: result["datasets"] = cons_ds[t_col].tolist()
+                t_col = None
+                for candidate in ['LINKED_TABLE', 'TABLE_NAME', 'DATASET_NAME', 'OBJECT_NAME', 'NAME', 'VIEW_NAME']:
+                    if candidate in cons_ds.columns:
+                        t_col = candidate
+                        break
+                if not t_col:
+                    for c in cons_ds.columns:
+                        if 'TABLE' in c or 'DATASET' in c or 'OBJECT' in c:
+                            t_col = c
+                            break
+                if t_col:
+                    result["datasets"] = cons_ds[t_col].tolist()
+                result["consumer_dataset_columns"] = list(cons_ds.columns)
 
-            reqs = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.LIST_TEMPLATE_REQUESTS('{cleanroom_name}')")
-            if not reqs.empty: result["templates"] = reqs['TEMPLATE_NAME'].tolist() if 'TEMPLATE_NAME' in reqs.columns else []
+            try:
+                added_tmps = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.VIEW_ADDED_TEMPLATES('{cleanroom_name}')")
+                if not added_tmps.empty:
+                    t_col = 'TEMPLATE_NAME' if 'TEMPLATE_NAME' in added_tmps.columns else ('NAME' if 'NAME' in added_tmps.columns else None)
+                    if t_col:
+                        result["templates"] = added_tmps[t_col].tolist()
+            except: pass
 
-            jp = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_join_policy('{cleanroom_name}')")
-            if not jp.empty: result["policies"]["join"] = jp.to_dict(orient='records')
+            if not result.get("templates"):
+                reqs = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.LIST_TEMPLATE_REQUESTS('{cleanroom_name}')")
+                if not reqs.empty: result["templates"] = reqs['TEMPLATE_NAME'].tolist() if 'TEMPLATE_NAME' in reqs.columns else []
 
-            cp = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_column_policy('{cleanroom_name}')")
-            if not cp.empty: result["policies"]["column"] = cp.to_dict(orient='records')
+            try:
+                jp = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_join_policy('{cleanroom_name}')")
+                if not jp.empty:
+                    result["policies"]["join"] = jp.to_dict(orient='records')
+                    result["join_policy_columns"] = list(jp.columns)
+            except: pass
+
+            try:
+                cp = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_column_policy('{cleanroom_name}')")
+                if not cp.empty:
+                    result["policies"]["column"] = cp.to_dict(orient='records')
+                    result["column_policy_columns"] = list(cp.columns)
+            except: pass
 
             try:
                 ap = fetch_df(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_activation_policy('{cleanroom_name}')")
@@ -481,7 +509,16 @@ def gen_data_offerings(session, cleanroom_name):
         if cons_res:
             for row in cons_res:
                 d = {k.upper(): v for k, v in row.as_dict().items()}
-                t_name = d.get('TABLE_NAME')
+                t_name = None
+                for col_candidate in ['LINKED_TABLE', 'TABLE_NAME', 'DATASET_NAME', 'OBJECT_NAME', 'NAME']:
+                    if col_candidate in d and d[col_candidate]:
+                        t_name = d[col_candidate]
+                        break
+                if not t_name:
+                    for k, v in d.items():
+                        if v and isinstance(v, str) and '.' in v and 'VIEW' not in k:
+                            t_name = v
+                            break
                 if t_name:
                     tables_data.append({'TABLE_NAME': t_name, 'SQL_ENABLED': False})
         
@@ -495,6 +532,8 @@ def gen_data_offerings(session, cleanroom_name):
         except: pass
         try:
             prov_join_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_provider_join_policy('{cleanroom_name}')")
+        except: pass
+        try:
             prov_col_df = get_df_upper(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.CONSUMER.view_provider_column_policy('{cleanroom_name}')")
         except: pass
 
@@ -510,7 +549,11 @@ def gen_data_offerings(session, cleanroom_name):
         tt = target_table.upper().strip()
         if pt == tt:
             return True
-        if pt.split('.')[-1] == tt.split('.')[-1]:
+        pt_parts = pt.split('.')
+        tt_parts = tt.split('.')
+        if len(pt_parts) >= 3 and len(tt_parts) >= 3 and pt_parts[-3:] == tt_parts[-3:]:
+            return True
+        if pt_parts[-1] == tt_parts[-1] and len(pt_parts) >= 2 and len(tt_parts) >= 2 and pt_parts[-2] == tt_parts[-2]:
             return True
         if tt.endswith(pt) or pt.endswith(tt):
             return True
@@ -520,13 +563,69 @@ def gen_data_offerings(session, cleanroom_name):
         for c in ['TABLE_NAME', 'DATASET_NAME', 'TABLE', 'OBJECT_NAME']:
             if c in df.columns:
                 return c
+        for c in df.columns:
+            if 'TABLE' in c or 'DATASET' in c or 'OBJECT' in c:
+                return c
         return None
 
     def find_col_col(df):
         for c in ['COLUMN_NAME', 'COLUMN', 'COL_NAME']:
             if c in df.columns:
                 return c
+        for c in df.columns:
+            if 'COL' in c and c != find_table_col(df):
+                return c
         return None
+
+    def extract_policies_from_df(df, target_table, policy_type='column'):
+        """Extract (table, column) pairs from a policy DataFrame.
+        Handles multiple result formats from consumer API:
+        1. Separate TABLE_NAME + COLUMN_NAME columns
+        2. Combined 'template:table:column' format in a single column
+        3. Combined 'table:column' format in a single column
+        """
+        results = []
+        if df.empty:
+            return results
+
+        tc = find_table_col(df)
+        cc = find_col_col(df)
+
+        if tc and cc:
+            for _, row in df.iterrows():
+                p_table = str(row.get(tc, ''))
+                p_col = str(row.get(cc, ''))
+                if table_matches(p_table, target_table) and p_col:
+                    results.append(p_col)
+            if results:
+                return results
+
+        for _, row in df.iterrows():
+            for col in df.columns:
+                val = str(row.get(col, '')).strip()
+                if ':' in val:
+                    parts = val.split(':')
+                    if len(parts) == 3:
+                        tpl, tbl, colname = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                        if table_matches(tbl, target_table) and colname:
+                            results.append(colname)
+                    elif len(parts) == 2:
+                        tbl, colname = parts[0].strip(), parts[1].strip()
+                        if table_matches(tbl, target_table) and colname:
+                            results.append(colname)
+        if results:
+            return results
+
+        if tc and not cc:
+            for _, row in df.iterrows():
+                p_table = str(row.get(tc, ''))
+                if table_matches(p_table, target_table):
+                    for c in df.columns:
+                        if c != tc:
+                            v = str(row.get(c, '')).strip()
+                            if v and '.' not in v and len(v) < 100:
+                                results.append(v)
+        return results
 
     for t_data in tables_data:
         t_name = t_data['TABLE_NAME']
@@ -534,47 +633,34 @@ def gen_data_offerings(session, cleanroom_name):
         
         schema_policies = {}
 
-        for policy_df, policy_type in [(join_df, 'join'), (prov_join_df, 'join')]:
+        for policy_df in [join_df, prov_join_df]:
             if policy_df.empty:
                 continue
-            tc = find_table_col(policy_df)
-            cc = find_col_col(policy_df)
-            if not tc or not cc:
-                continue
-            for _, row in policy_df.iterrows():
-                j_table = str(row.get(tc, ''))
-                if table_matches(j_table, t_name):
-                    cname = str(row[cc])
-                    if cname not in schema_policies:
-                        gtype = guess_type(cname)
-                        gtype = refine_type_by_data(t_name, cname, gtype)
-                        schema_policies[cname] = {'category': 'join_standard', 'column_type': gtype if gtype else 'MANUAL_REVIEW'}
+            join_cols = extract_policies_from_df(policy_df, t_name, 'join')
+            for cname in join_cols:
+                cname = cname.upper().strip()
+                if cname and cname not in schema_policies:
+                    gtype = guess_type(cname)
+                    gtype = refine_type_by_data(t_name, cname, gtype)
+                    schema_policies[cname] = {'category': 'join_standard', 'column_type': gtype if gtype else 'MANUAL_REVIEW'}
 
         for policy_df in [col_df, prov_col_df]:
             if policy_df.empty:
                 continue
-            tc = find_table_col(policy_df)
-            cc = find_col_col(policy_df)
-            if not tc or not cc:
-                continue
-            for _, row in policy_df.iterrows():
-                c_table = str(row.get(tc, ''))
-                if table_matches(c_table, t_name):
-                    cname = str(row[cc])
-                    if cname not in schema_policies:
-                        schema_policies[cname] = {'category': 'passthrough'}
+            col_names = extract_policies_from_df(policy_df, t_name, 'column')
+            for cname in col_names:
+                cname = cname.upper().strip()
+                if cname and cname not in schema_policies:
+                    schema_policies[cname] = {'category': 'passthrough'}
 
         if not act_df.empty:
-            tc = find_table_col(act_df)
-            cc = find_col_col(act_df)
-            if tc and cc:
-                for _, row in act_df.iterrows():
-                    a_table = str(row.get(tc, ''))
-                    if table_matches(a_table, t_name):
-                        cname = str(row[cc])
-                        if cname not in schema_policies:
-                            schema_policies[cname] = {'category': 'passthrough'}
-                        schema_policies[cname]['activation_allowed'] = True
+            act_cols = extract_policies_from_df(act_df, t_name, 'activation')
+            for cname in act_cols:
+                cname = cname.upper().strip()
+                if cname:
+                    if cname not in schema_policies:
+                        schema_policies[cname] = {'category': 'passthrough'}
+                    schema_policies[cname]['activation_allowed'] = True
                      
         if not schema_policies:
             try:
