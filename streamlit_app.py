@@ -53,6 +53,19 @@ def get_session():
 
 session = get_session()
 
+def _looks_like_uuid(name):
+    """Check if a cleanroom name looks like an internal UUID rather than a human-readable name."""
+    if not name:
+        return True
+    import re
+    clean = name.replace('-', '').replace('_', '').strip()
+    if re.fullmatch(r'[0-9a-fA-F]{20,}', clean):
+        return True
+    uuid_pattern = r'[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}'
+    if re.fullmatch(uuid_pattern, name.strip()):
+        return True
+    return False
+
 def list_cleanrooms():
     """Fetch available cleanrooms for the picker."""
     rooms = []
@@ -64,6 +77,9 @@ def list_cleanrooms():
                 name = d.get('CLEANROOM_NAME') or d.get('NAME')
                 cid = d.get('CLEANROOM_ID') or d.get('ID')
                 state = d.get('STATE') or d.get('STATUS') or ''
+                if _looks_like_uuid(name):
+                    rooms.append({"name": name, "role": "PROVIDER", "state": state, "api_room": False, "reason": "internal UUID"})
+                    continue
                 is_api = str(name).upper().replace(' ', '_') == str(cid).upper().replace(' ', '_') if name and cid else False
                 rooms.append({"name": name, "role": "PROVIDER", "state": state, "api_room": is_api})
     except:
@@ -77,7 +93,10 @@ def list_cleanrooms():
                 name = d.get('CLEANROOM_NAME') or d.get('NAME')
                 state = d.get('STATE') or d.get('STATUS') or ''
                 if name and name.upper() not in existing_names:
-                    rooms.append({"name": name, "role": "CONSUMER", "state": state, "api_room": True})
+                    if _looks_like_uuid(name):
+                        rooms.append({"name": name, "role": "CONSUMER", "state": state, "api_room": False, "reason": "internal UUID"})
+                    else:
+                        rooms.append({"name": name, "role": "CONSUMER", "state": state, "api_room": True})
     except:
         pass
     return rooms
@@ -250,9 +269,18 @@ with st.sidebar:
         selected = st.selectbox("Eligible Cleanrooms (P&C API)", room_options)
 
         if non_api_rooms:
-            with st.expander(f"Ineligible: {len(non_api_rooms)} UI cleanrooms"):
-                for r in non_api_rooms:
+            ui_rooms = [r for r in non_api_rooms if r.get('reason') != 'internal UUID']
+            uuid_rooms = [r for r in non_api_rooms if r.get('reason') == 'internal UUID']
+            label_parts = []
+            if ui_rooms:
+                label_parts.append(f"{len(ui_rooms)} UI cleanrooms")
+            if uuid_rooms:
+                label_parts.append(f"{len(uuid_rooms)} internal/UUID entries")
+            with st.expander(f"Ineligible: {', '.join(label_parts)}"):
+                for r in ui_rooms:
                     st.caption(f"{r['name']} ({r['role']}) - UI created, not migratable")
+                for r in uuid_rooms:
+                    st.caption(f"{r['name'][:16]}... ({r['role']}) - internal UUID, skipped")
 
         if selected and selected != "-- Select --":
             cr_name_from_picker = selected.split("  (")[0].strip()
