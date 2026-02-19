@@ -371,6 +371,20 @@ def gen_templates(session, cleanroom_name):
                         "default": ""
                     })
 
+        def normalize_param(p):
+            if not isinstance(p, dict): return p
+            ordered = {}
+            ordered['name'] = p.get('name', '')
+            ordered['type'] = p.get('type', 'string')
+            ordered['description'] = p.get('description', '')
+            ordered['default'] = p.get('default', '')
+            for k, v in p.items():
+                if k not in ordered:
+                    ordered[k] = v
+            return ordered
+
+        params = [normalize_param(p) for p in params]
+
         spec_dict = {
             'api_version': '2.0.0', 
             'spec_type': 'template', 
