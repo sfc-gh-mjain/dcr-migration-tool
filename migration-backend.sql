@@ -5,9 +5,10 @@ CREATE SCHEMA IF NOT EXISTS DCR_SNOWVA.MIGRATION;
 CREATE OR REPLACE TABLE DCR_SNOWVA.MIGRATION.MIGRATION_JOBS (
   JOB_ID STRING,
   CLEANROOM_NAME STRING,
+  ACTION STRING,
+  ROLE STRING,
   STARTED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
   FINISHED_AT TIMESTAMP_NTZ,
-  DRY_RUN BOOLEAN,
   STATUS STRING,
   DETAILS VARIANT
 );
@@ -1099,13 +1100,44 @@ import yaml
 import pandas as pd
 import hashlib
 import time
+import uuid as _uuid
 
 def agent_main(session, cleanroom_name, action_mode):
     action = action_mode.upper()
     dd = "$" + "$"
-    
+    job_id = str(_uuid.uuid4())
+    job_role = None
+    job_start = time.time()
+
+    def _log_job(status, result_str):
+        try:
+            elapsed = round(time.time() - job_start, 2)
+            summary = result_str[:4000] if result_str else '{}'
+            summary = summary.replace("'", "''")
+            role_val = f"'{job_role}'" if job_role else 'NULL'
+            safe_cr = cleanroom_name.replace("'", "''")
+            session.sql(f"""
+                INSERT INTO DCR_SNOWVA.MIGRATION.MIGRATION_JOBS
+                    (JOB_ID, CLEANROOM_NAME, ACTION, ROLE, STARTED_AT, FINISHED_AT, STATUS, DETAILS)
+                SELECT
+                    '{job_id}', '{safe_cr}', '{action}', {role_val},
+                    TIMESTAMPADD(SECOND, -{elapsed}, CURRENT_TIMESTAMP()),
+                    CURRENT_TIMESTAMP(), '{status}',
+                    TRY_PARSE_JSON('{summary}')
+            """).collect()
+        except:
+            pass
+
+    def _finish(result_str):
+        try:
+            parsed = json.loads(result_str)
+            status = parsed.get('status', 'UNKNOWN')
+        except:
+            status = 'UNKNOWN'
+        _log_job(status, result_str)
+        return result_str
+
     try:
-        # Check LAF Status for informational purposes
         laf_info = ""
         is_account_laf = False
         try:
@@ -1131,7 +1163,7 @@ def agent_main(session, cleanroom_name, action_mode):
         if check.get('status') == 'FAIL':
              errors = check.get('errors', [])
              msg = " | ".join(errors) if errors else "Prerequisites check failed."
-             return json.dumps({"status": "ERROR", "message": msg, "warnings": prereq_warnings})
+             return _finish(json.dumps({"status": "ERROR", "message": msg, "warnings": prereq_warnings}))
         
         is_provider = False
         try:
@@ -1153,15 +1185,16 @@ def agent_main(session, cleanroom_name, action_mode):
              except: pass
              
         if not is_provider and not is_consumer:
-             return json.dumps({"status": "ERROR", "message": f"Cleanroom '{cleanroom_name}' not found or access denied."})
+             return _finish(json.dumps({"status": "ERROR", "message": f"Cleanroom '{cleanroom_name}' not found or access denied."}))
 
         role_type = "PROVIDER" if is_provider else "CONSUMER"
+        job_role = role_type
         
         safe_collab_name = f"migrated_{cleanroom_name.replace(' ', '_')}"
         
         if action == 'TEARDOWN':
             res = session.call("DCR_SNOWVA.MIGRATION.TEARDOWN", safe_collab_name)
-            return json.dumps({"status": "SUCCESS", "message": res})
+            return _finish(json.dumps({"status": "SUCCESS", "message": res}))
 
         res_tmps = session.call("DCR_SNOWVA.MIGRATION.GENERATE_TEMPLATE_SPECS", cleanroom_name)
         tmps = json.loads(res_tmps) if isinstance(res_tmps, str) else res_tmps
@@ -1300,7 +1333,7 @@ def agent_main(session, cleanroom_name, action_mode):
             t_count = len(tmps) if tmps else 0
             d_count = len(dos) if dos else 0
             
-            return json.dumps({
+            return _finish(json.dumps({
                 "status": "READY_TO_MIGRATE",
                 "role": role_type,
                 "summary": f"Found {t_count} templates and {d_count} datasets.{laf_info}",
@@ -1311,7 +1344,7 @@ def agent_main(session, cleanroom_name, action_mode):
                     "provider_data": dos,
                     "target_collaboration": safe_collab_name
                 }
-            })
+            }))
 
         elif action == 'EXECUTE':
             actions_taken = []
@@ -1349,7 +1382,7 @@ def agent_main(session, cleanroom_name, action_mode):
             if is_provider:
                 collab_yml = session.call("DCR_SNOWVA.MIGRATION.GENERATE_COLLABORATION_SPEC", cleanroom_name, prov_ids, [], tmp_ids, has_activation)
                 actions_taken.append(f"Generated collaboration spec for: {safe_collab_name}")
-                return json.dumps({
+                return _finish(json.dumps({
                     "status": "SUCCESS",
                     "message": f"Templates and data offerings registered for '{cleanroom_name}'.",
                     "actions": actions_taken,
@@ -1357,7 +1390,7 @@ def agent_main(session, cleanroom_name, action_mode):
                     "collab_spec": collab_yml,
                     "collab_name": safe_collab_name,
                     "next_step": "INITIALIZE"
-                })
+                }))
             else:
                 owner_acct = ""
                 try:
@@ -1370,7 +1403,7 @@ def agent_main(session, cleanroom_name, action_mode):
                                 break
                 except: pass
                 actions_taken.append("Consumer artifacts registered.")
-                return json.dumps({
+                return _finish(json.dumps({
                     "status": "SUCCESS",
                     "message": f"Consumer artifacts registered for '{cleanroom_name}'.",
                     "actions": actions_taken,
@@ -1378,7 +1411,7 @@ def agent_main(session, cleanroom_name, action_mode):
                     "collab_name": safe_collab_name,
                     "owner_account": owner_acct,
                     "next_step": "REVIEW_AND_JOIN"
-                })
+                }))
 
         elif action == 'CHECK_STATUS':
             try:
@@ -1432,13 +1465,13 @@ def agent_main(session, cleanroom_name, action_mode):
                         result["hint"] = "INITIALIZE failed because it requires SYSTEM$ACCEPT_LEGAL_TERMS which cannot run inside a stored procedure. Please run the INITIALIZE and JOIN commands manually in a Snowflake worksheet. Use the generated script from the Review Plan tab."
                     else:
                         result["hint"] = "The collaboration creation failed. Check the error details above. You may need to teardown and re-create, or run the script manually in a worksheet."
-                return json.dumps(result)
+                return _finish(json.dumps(result))
             except Exception as e:
                 err = str(e)[:500]
                 hint = ""
                 if 'collaborationnotfoun' in err.lower() or 'not found' in err.lower():
                     hint = "Collaboration not found. Run EXECUTE first to create it."
-                return json.dumps({"status": "ERROR", "message": err, "hint": hint})
+                return _finish(json.dumps({"status": "ERROR", "message": err, "hint": hint}))
 
         elif action == 'JOIN':
             try:
@@ -1449,7 +1482,7 @@ def agent_main(session, cleanroom_name, action_mode):
                         row = {k.upper(): v for k, v in res[0].as_dict().items()}
                         current_status = row.get('STATUS')
                     if current_status != 'CREATED':
-                        return json.dumps({"status": "ERROR", "message": f"Collaboration is not ready. Current status: {current_status}. Please wait for 'CREATED'."})
+                        return _finish(json.dumps({"status": "ERROR", "message": f"Collaboration is not ready. Current status: {current_status}. Please wait for 'CREATED'."}))
 
                 msg = []
                 if role_type == 'CONSUMER':
@@ -1473,28 +1506,28 @@ def agent_main(session, cleanroom_name, action_mode):
 
                 session.call("SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.JOIN", safe_collab_name)
                 msg.append("Join command submitted")
-                return json.dumps({"status": "SUCCESS", "message": ". ".join(msg)})
+                return _finish(json.dumps({"status": "SUCCESS", "message": ". ".join(msg)}))
             except Exception as e:
                 if "side effects" in str(e).lower() or "accept_legal_terms" in str(e).lower():
-                    return json.dumps({
+                    return _finish(json.dumps({
                         "status": "WARNING",
                         "message": f"Join requires manual acceptance of legal terms. Please run 'CALL samooha_by_snowflake_local_db.collaboration.join('{safe_collab_name}')' in a worksheet."
-                    })
-                return json.dumps({"status": "ERROR", "message": str(e)})
+                    }))
+                return _finish(json.dumps({"status": "ERROR", "message": str(e)}))
             
         elif action == 'VALIDATE':
             report = session.call("DCR_SNOWVA.MIGRATION.VALIDATE", cleanroom_name, safe_collab_name)
-            return str(report)
+            return _finish(str(report))
 
         elif action == 'GENERATE_ANALYSIS':
-            return json.dumps({"status": "SUCCESS", "message": "Analysis generation not fully supported in Consumer-empty mode yet."})
+            return _finish(json.dumps({"status": "SUCCESS", "message": "Analysis generation not fully supported in Consumer-empty mode yet."}))
 
         elif action == 'TEARDOWN':
             res = session.call("DCR_SNOWVA.MIGRATION.TEARDOWN", safe_collab_name)
-            return json.dumps({"status": "SUCCESS", "message": res})
+            return _finish(json.dumps({"status": "SUCCESS", "message": res}))
         
-        else: return json.dumps({"status": "ERROR", "message": "INVALID MODE"})
+        else: return _finish(json.dumps({"status": "ERROR", "message": "INVALID MODE"}))
 
     except Exception as e:
-        return json.dumps({"status": "ERROR", "message": str(e)})
+        return _finish(json.dumps({"status": "ERROR", "message": str(e)}))
 $$;
