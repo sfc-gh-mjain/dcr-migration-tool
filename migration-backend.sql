@@ -391,17 +391,27 @@ def gen_templates(session, cleanroom_name):
 
         params = [normalize_param(p) for p in params]
 
-        spec_dict = {
+        spec_dict_no_tpl = {
             'api_version': '2.0.0', 
             'spec_type': 'template', 
             'name': f"migrated_{t_name}",
             'version': ver_str, 
             'type': 'sql_activation' if is_activation else 'sql_analysis',
             'description': f"Migrated from legacy: {t_name}", 
-            'parameters': params, 
-            'template': cleaned_sql
+            'parameters': params
         }
-        specs.append(yaml.dump(spec_dict, Dumper=LiteralBlockDumper, default_flow_style=False, sort_keys=False))
+        yaml_header = yaml.dump(spec_dict_no_tpl, Dumper=LiteralBlockDumper, default_flow_style=False, sort_keys=False)
+
+        tpl_clean = cleaned_sql.strip()
+        if '\n' in tpl_clean:
+            tpl_lines = tpl_clean.split('\n')
+            indented = '\n'.join('  ' + line.rstrip() for line in tpl_lines)
+            yaml_out = yaml_header + f"template: |\n{indented}\n"
+        else:
+            safe_tpl = tpl_clean.replace("'", "''")
+            yaml_out = yaml_header + f"template: '{safe_tpl}'\n"
+
+        specs.append(yaml_out)
     return specs
 $$;
 
