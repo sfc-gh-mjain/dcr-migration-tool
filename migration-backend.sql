@@ -333,6 +333,11 @@ def gen_templates(session, cleanroom_name):
         
         if not t_name or not t_sql: continue
 
+        if '\\n' in t_sql:
+            t_sql = t_sql.replace('\\n', '\n')
+        if '\\t' in t_sql:
+            t_sql = t_sql.replace('\\t', '\t')
+
         is_activation = "cleanroom.activation_" in t_sql.lower()
         cleaned_sql = t_sql
         if not is_activation:
