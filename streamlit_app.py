@@ -99,7 +99,79 @@ def list_cleanrooms():
                         rooms.append({"name": name, "role": "CONSUMER", "state": state, "api_room": True})
     except:
         pass
+
+    migrated_set = _get_migrated_cleanrooms()
+    for r in rooms:
+        r['migrated'] = r.get('name', '').upper() in migrated_set
+
     return rooms
+
+def _get_migrated_cleanrooms():
+    """Query MIGRATION_JOBS for cleanrooms that were successfully migrated."""
+    migrated = set()
+    try:
+        res = session.sql("""
+            SELECT DISTINCT UPPER(CLEANROOM_NAME) AS CR
+            FROM DCR_SNOWVA.MIGRATION.MIGRATION_JOBS
+            WHERE STATUS IN ('SUCCESS', 'READY_TO_MIGRATE')
+              AND ACTION IN ('EXECUTE', 'PLAN')
+        """).collect()
+        for r in res:
+            migrated.add(r['CR'])
+    except:
+        pass
+    return migrated
+
+def list_collab_dcrs():
+    """Fetch Collaboration DCRs and mark which ones were migrated from P&C."""
+    collabs = []
+    migrated_set = _get_migrated_cleanrooms()
+
+    migrated_collab_names = {}
+    try:
+        res = session.sql("""
+            SELECT DISTINCT CLEANROOM_NAME,
+                   PARSE_JSON(DETAILS):collab_name::STRING AS COLLAB_NAME
+            FROM DCR_SNOWVA.MIGRATION.MIGRATION_JOBS
+            WHERE STATUS = 'SUCCESS' AND ACTION = 'EXECUTE'
+              AND COLLAB_NAME IS NOT NULL
+        """).collect()
+        for r in res:
+            d = {k.upper(): v for k, v in r.as_dict().items()}
+            cname = d.get('COLLAB_NAME')
+            src = d.get('CLEANROOM_NAME')
+            if cname:
+                migrated_collab_names[cname.upper()] = src
+    except:
+        pass
+
+    try:
+        v_res = session.sql("CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.VIEW_COLLABORATIONS()").collect()
+        if v_res:
+            for r in v_res:
+                d = {k.upper(): v for k, v in r.as_dict().items()}
+                name = d.get('COLLABORATION_NAME') or d.get('NAME') or ''
+                status = d.get('STATUS') or d.get('STATE') or ''
+                owner = d.get('OWNER_ACCOUNT') or ''
+                name_upper = name.upper()
+
+                migrated_from = None
+                if isinstance(migrated_collab_names, dict):
+                    migrated_from = migrated_collab_names.get(name_upper)
+                if not migrated_from and name_upper.startswith('MIGRATED_'):
+                    original = name_upper.replace('MIGRATED_', '', 1)
+                    if original in migrated_set:
+                        migrated_from = original
+
+                collabs.append({
+                    "name": name,
+                    "status": status,
+                    "owner": owner,
+                    "migrated_from": migrated_from
+                })
+    except:
+        pass
+    return collabs
 
 def get_migration_plan(cleanroom_name):
     try:
@@ -259,14 +331,22 @@ with st.sidebar:
                 st.session_state['available_rooms'] = rooms
             else:
                 st.warning("No cleanrooms found.")
+            try:
+                collabs = list_collab_dcrs()
+                st.session_state['collab_dcrs'] = collabs
+            except:
+                st.session_state['collab_dcrs'] = []
 
     if 'available_rooms' in st.session_state and st.session_state['available_rooms']:
         rooms = st.session_state['available_rooms']
         api_rooms = [r for r in rooms if r.get('api_room')]
         non_api_rooms = [r for r in rooms if not r.get('api_room')]
 
-        room_options = ["-- Select --"] + [f"{r['name']}  ({r['role']}, {r['state']})" for r in api_rooms]
-        selected = st.selectbox("Eligible Cleanrooms (P&C API)", room_options)
+        room_options = ["-- Select --"]
+        for r in api_rooms:
+            tag = " [migrated]" if r.get('migrated') else ""
+            room_options.append(f"{r['name']}  ({r['role']}, {r['state']}{tag})")
+        selected = st.selectbox("P&C Cleanrooms", room_options)
 
         if non_api_rooms:
             ui_rooms = [r for r in non_api_rooms if r.get('reason') != 'internal UUID']
@@ -281,6 +361,16 @@ with st.sidebar:
                     st.caption(f"{r['name']} ({r['role']}) - UI created, not migratable")
                 for r in uuid_rooms:
                     st.caption(f"{r['name'][:16]}... ({r['role']}) - internal UUID, skipped")
+
+        if 'collab_dcrs' in st.session_state and st.session_state['collab_dcrs']:
+            collabs = st.session_state['collab_dcrs']
+            with st.expander(f"Collaboration DCRs ({len(collabs)})"):
+                for c in collabs:
+                    src = c.get('migrated_from')
+                    if src:
+                        st.caption(f"**{c['name']}** ({c['status']}) - migrated from `{src}`")
+                    else:
+                        st.caption(f"{c['name']} ({c['status']})")
 
         if selected and selected != "-- Select --":
             cr_name_from_picker = selected.split("  (")[0].strip()
