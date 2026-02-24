@@ -431,16 +431,24 @@ import hashlib
 from datetime import datetime
 
 def gen_data_offerings(session, cleanroom_name):
+    VALID_COLUMN_TYPES = [
+        'email', 'hashed_email_sha256', 'hashed_email_b64_encoded',
+        'phone', 'hashed_phone_sha256', 'hashed_phone_b64_encoded',
+        'device_id', 'hashed_device_id_sha256', 'hashed_device_b64_encoded',
+        'ip_address', 'hashed_ip_address_sha256', 'hashed_ip_address_b64_encoded',
+        'first_name', 'hashed_first_name_sha256', 'hashed_first_name_b64_encoded',
+    ]
+
     def guess_type(cname):
-        c = cname.lower()
-        if 'email' in c:
+        c = cname.lower().strip()
+        if c in ('hem', 'hashed_email', 'h_email') or 'email' in c:
             if 'b64' in c: return 'hashed_email_b64_encoded'
-            if 'hash' in c or 'sha256' in c: return 'hashed_email_sha256'
-            return 'email'
-        if 'phone' in c:
+            if c == 'email': return 'email'
+            return 'hashed_email_sha256'
+        if c in ('hpn', 'hashed_phone', 'h_phone') or 'phone' in c:
             if 'b64' in c: return 'hashed_phone_b64_encoded'
-            if 'hash' in c or 'sha256' in c: return 'hashed_phone_sha256'
-            return 'phone' 
+            if c == 'phone': return 'phone'
+            return 'hashed_phone_sha256'
         if 'ip' in c and 'zip' not in c:
             if 'b64' in c: return 'hashed_ip_address_b64_encoded'
             if 'hash' in c or 'sha256' in c: return 'hashed_ip_address_sha256'
@@ -449,6 +457,10 @@ def gen_data_offerings(session, cleanroom_name):
             if 'b64' in c: return 'hashed_device_b64_encoded'
             if 'hash' in c or 'sha256' in c: return 'hashed_device_id_sha256'
             return 'device_id'
+        if 'first_name' in c or c == 'fname':
+            if 'b64' in c: return 'hashed_first_name_b64_encoded'
+            if 'hash' in c or 'sha256' in c: return 'hashed_first_name_sha256'
+            return 'first_name'
         return None
     
     def refine_type_by_data(table, col, proposed_type):
@@ -672,7 +684,10 @@ def gen_data_offerings(session, cleanroom_name):
                 if cname and cname not in schema_policies:
                     gtype = guess_type(cname)
                     gtype = refine_type_by_data(t_name, cname, gtype)
-                    schema_policies[cname] = {'category': 'join_standard', 'column_type': gtype if gtype else 'MANUAL_REVIEW'}
+                    policy = {'category': 'join_standard'}
+                    if gtype:
+                        policy['column_type'] = gtype
+                    schema_policies[cname] = policy
 
         for policy_df in [col_df, prov_col_df]:
             if policy_df.empty:
