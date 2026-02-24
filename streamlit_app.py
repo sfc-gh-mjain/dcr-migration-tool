@@ -333,14 +333,26 @@ with st.sidebar:
     st.caption("v2.1.0 Migration Toolkit")
     st.divider()
 
-    if st.button("Refresh Cleanroom Lists", use_container_width=True):
-        with st.spinner("Fetching cleanrooms..."):
+    btn_col1, btn_col2 = st.columns(2)
+    if btn_col1.button("P&C Cleanrooms", use_container_width=True):
+        with st.spinner("Fetching P&C cleanrooms..."):
             rooms = list_cleanrooms()
-            collabs = list_collab_dcrs()
             st.session_state['available_rooms'] = rooms if rooms else []
+            if not rooms:
+                st.warning("No P&C cleanrooms found.")
+
+    if btn_col2.button("Migrated DCRs", use_container_width=True):
+        with st.spinner("Fetching collaboration DCRs..."):
+            collabs = list_collab_dcrs()
             st.session_state['collab_dcrs'] = collabs if collabs else []
-            if not rooms and not collabs:
-                st.warning("No cleanrooms found.")
+            if not collabs:
+                st.info("No collaboration DCRs found.")
+            else:
+                migrated_count = sum(1 for c in collabs if c.get('source_pnc'))
+                if migrated_count:
+                    st.success(f"Found {migrated_count} migrated DCR(s)")
+                else:
+                    st.info(f"Found {len(collabs)} collaboration(s), none migrated from P&C.")
 
     # --- P&C DCR Dropdown (source for migration) ---
     if st.session_state.get('available_rooms'):
@@ -384,15 +396,14 @@ with st.sidebar:
     else:
         cleanroom_input = st.text_input("Cleanroom Name", placeholder="e.g. mj_act_uc")
 
-    # --- Collaboration DCR / Migration History ---
-    st.divider()
-    st.caption("Migration History")
-    if 'collab_dcrs' not in st.session_state:
-        st.info("Click **Refresh Cleanroom Lists** to load migration history.")
-    else:
-        collabs = st.session_state.get('collab_dcrs', [])
+    # --- Collaboration DCR Dropdown (migration targets) ---
+    if st.session_state.get('collab_dcrs'):
+        st.divider()
+        collabs = st.session_state['collab_dcrs']
         migrated = [c for c in collabs if c.get('source_pnc')]
         non_migrated = [c for c in collabs if not c.get('source_pnc')]
+
+        st.caption(f"Collaboration DCRs ({len(collabs)} total)")
 
         if migrated:
             with st.expander(f"Migrated from P&C ({len(migrated)})", expanded=True):
@@ -400,8 +411,6 @@ with st.sidebar:
                     history = c.get('migration_history', {})
                     st.markdown(f"**{c['name']}** &nbsp; `{c['status']}`")
                     st.json({"migration_history": history})
-        else:
-            st.caption("No migrated collaborations found yet.")
 
         if non_migrated:
             with st.expander(f"Other Collaborations ({len(non_migrated)})"):
