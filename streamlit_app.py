@@ -369,10 +369,9 @@ with st.sidebar:
         st.divider()
         collabs = st.session_state['collab_dcrs']
         st.caption(f"Migrated DCRs ({len(collabs)})")
-        with st.expander(f"Migration History ({len(collabs)})", expanded=True):
-            for c in collabs:
-                history = c.get('migration_history', {})
-                st.markdown(f"**{c['name']}** &nbsp; `{c['status']}`")
+        for c in collabs:
+            history = c.get('migration_history', {})
+            with st.expander(f"{c['name']}  —  {c['status']}"):
                 st.json({"migration_history": history})
 
     if st.button("Generate Plan", type="primary", use_container_width=True):
