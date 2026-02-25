@@ -1025,10 +1025,15 @@ def validate(session, cleanroom_name, collab_name):
                 if new_templates_df:
                      for r in new_templates_df:
                         row_dict = {k.upper(): v for k, v in r.as_dict().items()}
-                        name = row_dict.get('NAME') or row_dict.get('TEMPLATE_NAME')
-                        if name: new_template_names.add(name)
+                        name = row_dict.get('NAME') or row_dict.get('TEMPLATE_NAME') or row_dict.get('ID') or ''
+                        if name: new_template_names.add(name.upper())
 
-                missing = [f"migrated_{old}" for old in legacy_names if f"migrated_{old}" not in new_template_names]
+                missing = []
+                for old in legacy_names:
+                    expected = f"migrated_{old}".upper()
+                    found = any(n == expected or n.startswith(expected + '_') or n == expected + '_MIGRATION_V1' for n in new_template_names)
+                    if not found:
+                        missing.append(f"migrated_{old}")
                 if not missing:
                     log_step("Template Parity", "PASS", f"All {len(legacy_names)} templates found in new collaboration.")
                 else:
@@ -1047,19 +1052,15 @@ def validate(session, cleanroom_name, collab_name):
                 if new_dos_df:
                      for r in new_dos_df:
                         row_dict = {k.upper(): v for k, v in r.as_dict().items()}
-                        name = row_dict.get('NAME') or row_dict.get('DATA_OFFERING_NAME')
-                        if name: new_do_names.add(name)
+                        name = row_dict.get('NAME') or row_dict.get('DATA_OFFERING_NAME') or row_dict.get('ID') or ''
+                        if name: new_do_names.add(name.upper())
 
                 missing_dos = []
                 for t in legacy_tables:
-                    sanitized = f"migrated_{t.replace('.', '_')}"
-                    found = False
-                    for n in new_do_names:
-                        if n.startswith(sanitized[:50]):
-                            found = True
-                            break
+                    sanitized = f"migrated_{t.replace('.', '_')}".upper()
+                    found = any(n == sanitized or n.startswith(sanitized + '_') or n == sanitized + '_MIGRATION_V1' for n in new_do_names)
                     if not found:
-                        missing_dos.append(sanitized)
+                        missing_dos.append(f"migrated_{t.replace('.', '_')}")
 
                 if not missing_dos:
                     log_step("Data Offering Parity", "PASS", f"All {len(legacy_tables)} data offerings found in new collaboration.")
