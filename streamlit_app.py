@@ -102,83 +102,51 @@ def list_cleanrooms():
     return rooms
 
 def list_collab_dcrs():
-    """Fetch Collaboration DCRs (v2) and cross-reference with migration history."""
-    migrated_map = {}
+    """Fetch migrated DCRs directly from MIGRATION_JOBS table."""
+    collabs = []
     try:
         jobs = session.sql("""
             SELECT JOB_ID, CLEANROOM_NAME, ACTION, STATUS, FINISHED_AT
             FROM DCR_SNOWVA.MIGRATION.MIGRATION_JOBS
             WHERE STATUS IN ('SUCCESS', 'READY_TO_MIGRATE')
-              AND ACTION IN ('EXECUTE', 'PLAN')
             ORDER BY FINISHED_AT DESC
         """).collect()
+
+        seen = {}
         for j in jobs:
             d = {k.upper(): v for k, v in j.as_dict().items()}
             cr = d.get('CLEANROOM_NAME', '')
-            if cr and cr.upper() not in migrated_map:
-                migrated_map[cr.upper()] = {
-                    "migration_job_id": d.get('JOB_ID', ''),
+            if not cr or cr.upper() in seen:
+                continue
+            seen[cr.upper()] = True
+
+            collab_name = f"migrated_{cr}"
+            status = ''
+            try:
+                st_res = session.sql(
+                    f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.GET_STATUS('{collab_name}')"
+                ).collect()
+                if st_res:
+                    row = {k.upper(): v for k, v in st_res[0].as_dict().items()}
+                    status = row.get('STATUS') or row.get('STATE') or ''
+            except:
+                pass
+
+            collabs.append({
+                "name": collab_name,
+                "status": status or d.get('STATUS', ''),
+                "owner": "",
+                "created": str(d.get('FINISHED_AT', '')),
+                "source_pnc": cr.upper(),
+                "migration_history": {
+                    "migrated_from_pnc": True,
+                    "source_cleanroom": cr,
                     "migration_timestamp": str(d.get('FINISHED_AT', '')),
+                    "migration_job_id": d.get('JOB_ID', ''),
                 }
-    except:
-        pass
-
-    def _build_migration_history(collab_name, fallback_timestamp=''):
-        norm = collab_name.upper().replace(' ', '_')
-        if not norm.startswith('MIGRATED_'):
-            return None, None
-        source_pnc = norm[len('MIGRATED_'):]
-        job = migrated_map.get(source_pnc)
-        history = {
-            "migrated_from_pnc": True,
-            "source_cleanroom": source_pnc,
-            "migration_timestamp": job['migration_timestamp'] if job else fallback_timestamp,
-            "migration_job_id": job['migration_job_id'] if job else None
-        }
-        return source_pnc, history
-
-    collabs = []
-    try:
-        res = session.sql("SELECT * FROM SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PUBLIC.COLLABORATION_RECORD").collect()
-        if res:
-            for r in res:
-                d = {k.upper(): v for k, v in r.as_dict().items()}
-                name = d.get('COLLABORATION_NAME') or d.get('NAME') or ''
-                status = d.get('STATUS') or d.get('STATE') or ''
-                owner = d.get('OWNER') or d.get('OWNER_ACCOUNT') or ''
-                created = str(d.get('CREATED_AT') or d.get('CREATED') or '')
-
-                source_pnc, migration_history = _build_migration_history(name, created)
-
-                collabs.append({
-                    "name": name,
-                    "status": status,
-                    "owner": owner,
-                    "created": created,
-                    "source_pnc": source_pnc,
-                    "migration_history": migration_history
-                })
-    except:
-        try:
-            res = session.sql("CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.LIST()").collect()
-            if res:
-                for r in res:
-                    d = {k.upper(): v for k, v in r.as_dict().items()}
-                    name = d.get('COLLABORATION_NAME') or d.get('NAME') or ''
-                    status = d.get('STATUS') or d.get('STATE') or ''
-
-                    source_pnc, migration_history = _build_migration_history(name)
-
-                    collabs.append({
-                        "name": name,
-                        "status": status,
-                        "owner": "",
-                        "created": "",
-                        "source_pnc": source_pnc,
-                        "migration_history": migration_history
-                    })
-        except:
-            pass
+            })
+    except Exception as e:
+        st.warning(f"Could not fetch migration jobs: {str(e)[:300]}")
 
     return collabs
 
@@ -396,26 +364,16 @@ with st.sidebar:
     else:
         cleanroom_input = st.text_input("Cleanroom Name", placeholder="e.g. mj_act_uc")
 
-    # --- Collaboration DCR Dropdown (migration targets) ---
+    # --- Migrated DCRs (from MIGRATION_JOBS) ---
     if st.session_state.get('collab_dcrs'):
         st.divider()
         collabs = st.session_state['collab_dcrs']
-        migrated = [c for c in collabs if c.get('source_pnc')]
-        non_migrated = [c for c in collabs if not c.get('source_pnc')]
-
-        st.caption(f"Collaboration DCRs ({len(collabs)} total)")
-
-        if migrated:
-            with st.expander(f"Migrated from P&C ({len(migrated)})", expanded=True):
-                for c in migrated:
-                    history = c.get('migration_history', {})
-                    st.markdown(f"**{c['name']}** &nbsp; `{c['status']}`")
-                    st.json({"migration_history": history})
-
-        if non_migrated:
-            with st.expander(f"Other Collaborations ({len(non_migrated)})"):
-                for c in non_migrated:
-                    st.caption(f"{c['name']} ({c['status']})")
+        st.caption(f"Migrated DCRs ({len(collabs)})")
+        with st.expander(f"Migration History ({len(collabs)})", expanded=True):
+            for c in collabs:
+                history = c.get('migration_history', {})
+                st.markdown(f"**{c['name']}** &nbsp; `{c['status']}`")
+                st.json({"migration_history": history})
 
     if st.button("Generate Plan", type="primary", use_container_width=True):
         if not cleanroom_input:
