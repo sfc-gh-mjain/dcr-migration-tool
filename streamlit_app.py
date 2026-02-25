@@ -572,6 +572,19 @@ else:
 4. Run each statement sequentially
 """)
 
+        st.warning(
+            "**If JOIN fails with `ReferenceUsageGrantMissingException`**, "
+            "you need an ACCOUNTADMIN to grant REFERENCE_USAGE on the database(s) "
+            "mentioned in the error to the share name shown. Example fix:\n\n"
+            "```\n"
+            "USE ROLE ACCOUNTADMIN;\n"
+            "GRANT REFERENCE_USAGE ON DATABASE <your_db>\n"
+            "  TO SHARE <share_name_from_error>;\n"
+            "USE ROLE SAMOOHA_APP_ROLE;\n"
+            "```\n\n"
+            "Then retry the JOIN command."
+        )
+
         join_sql_lines = ["-- Run this in a Snowflake SQL Worksheet"]
         join_sql_lines.append("USE ROLE SAMOOHA_APP_ROLE;")
         join_sql_lines.append("USE SECONDARY ROLES NONE;")
