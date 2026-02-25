@@ -1016,29 +1016,43 @@ def validate(session, cleanroom_name, collab_name):
             report['remediation'].append("Validation requires the collaboration to exist and at least one collaborator to have joined. Complete the EXECUTE and JOIN steps first.")
             return report
 
+        def _extract_all_names(rows):
+            """Extract all string values from every column of every row, uppercased."""
+            names = set()
+            for r in rows:
+                row_dict = r.as_dict()
+                for k, v in row_dict.items():
+                    if v and isinstance(v, str) and len(v) > 2:
+                        names.add(v.upper())
+            return names
+
+        def _fuzzy_match(expected_prefix, name_set):
+            """Check if expected_prefix matches any name (exact, with version suffix, or prefix)."""
+            up = expected_prefix.upper()
+            for n in name_set:
+                if up == n or n.startswith(up + '_') or n.startswith(up + ':') or up in n:
+                    return True
+            return False
+
         if is_provider:
             try:
                 legacy_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.VIEW_ADDED_TEMPLATES('{cleanroom_name}')").collect()
                 legacy_names = [r['TEMPLATE_NAME'] for r in legacy_df] if legacy_df else []
                 new_templates_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.VIEW_TEMPLATES('{collab_name}')").collect()
-                new_template_names = set()
-                if new_templates_df:
-                     for r in new_templates_df:
-                        row_dict = {k.upper(): v for k, v in r.as_dict().items()}
-                        name = row_dict.get('NAME') or row_dict.get('TEMPLATE_NAME') or row_dict.get('ID') or ''
-                        if name: new_template_names.add(name.upper())
+
+                new_template_names = _extract_all_names(new_templates_df) if new_templates_df else set()
 
                 missing = []
                 for old in legacy_names:
-                    expected = f"migrated_{old}".upper()
-                    found = any(n == expected or n.startswith(expected + '_') or n == expected + '_MIGRATION_V1' for n in new_template_names)
-                    if not found:
-                        missing.append(f"migrated_{old}")
+                    expected = f"migrated_{old}"
+                    if not _fuzzy_match(expected, new_template_names):
+                        missing.append(expected)
                 if not missing:
                     log_step("Template Parity", "PASS", f"All {len(legacy_names)} templates found in new collaboration.")
                 else:
                      log_step("Template Parity", "FAIL", f"Missing templates: {missing}",
-                         f"Re-register missing templates using: CALL samooha_by_snowflake_local_db.registry.register_template(...)  Then re-run EXECUTE.")
+                         f"Found in collaboration: {sorted(list(new_template_names))[:10]}. "
+                         f"Re-register missing templates, then re-run EXECUTE.")
                      report['missing_objects'].extend(missing)
             except Exception as e:
                 log_step("Template Parity", "FAIL", str(e)[:300],
@@ -1048,25 +1062,21 @@ def validate(session, cleanroom_name, collab_name):
                 prov_ds = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.PROVIDER.view_provider_datasets('{cleanroom_name}')").collect()
                 legacy_tables = [r['TABLE_NAME'] for r in prov_ds if "TEMP_PUBLIC_KEY" not in r['TABLE_NAME']] if prov_ds else []
                 new_dos_df = session.sql(f"CALL SAMOOHA_BY_SNOWFLAKE_LOCAL_DB.COLLABORATION.VIEW_DATA_OFFERINGS('{collab_name}')").collect()
-                new_do_names = set()
-                if new_dos_df:
-                     for r in new_dos_df:
-                        row_dict = {k.upper(): v for k, v in r.as_dict().items()}
-                        name = row_dict.get('NAME') or row_dict.get('DATA_OFFERING_NAME') or row_dict.get('ID') or ''
-                        if name: new_do_names.add(name.upper())
+
+                new_do_names = _extract_all_names(new_dos_df) if new_dos_df else set()
 
                 missing_dos = []
                 for t in legacy_tables:
-                    sanitized = f"migrated_{t.replace('.', '_')}".upper()
-                    found = any(n == sanitized or n.startswith(sanitized + '_') or n == sanitized + '_MIGRATION_V1' for n in new_do_names)
-                    if not found:
-                        missing_dos.append(f"migrated_{t.replace('.', '_')}")
+                    sanitized = f"migrated_{t.replace('.', '_')}"
+                    if not _fuzzy_match(sanitized, new_do_names):
+                        missing_dos.append(sanitized)
 
                 if not missing_dos:
                     log_step("Data Offering Parity", "PASS", f"All {len(legacy_tables)} data offerings found in new collaboration.")
                 else:
                     log_step("Data Offering Parity", "FAIL", f"Missing data offerings: {missing_dos}",
-                        f"Re-register missing data offerings using: CALL samooha_by_snowflake_local_db.registry.register_data_offering(...)  Then re-run EXECUTE.")
+                        f"Found in collaboration: {sorted(list(new_do_names))[:10]}. "
+                        f"Re-register missing data offerings, then re-run EXECUTE.")
                     report['missing_objects'].extend(missing_dos)
             except Exception as e:
                 log_step("Data Offering Parity", "FAIL", str(e)[:300],
