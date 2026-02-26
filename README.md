@@ -31,33 +31,57 @@ The DCR Migration Tool is an automated engine that upgrades legacy P&C API clean
 
 ## Prerequisites
 
-| Requirement | Details |
-|-------------|---------|
-| **Snowflake Account** | Access to an account with the Samooha Native App installed |
-| **Role** | `SAMOOHA_APP_ROLE` for running the backend and Streamlit app |
-| **Privileges** | Ability to create databases/schemas (for tool installation) and call Native App procedures |
+1. **Snowflake Data Clean Room app** must already be installed on your account.
+2. You must have access to the `SAMOOHA_APP_ROLE` role.
+3. The role must have permissions to create databases/schemas (for tool installation) and call Native App procedures.
 
----
+## Discovering the Migration Tool
+
+| Channel | Details |
+|---------|---------|
+| **Documentation (GA)** | [docs.snowflake.com/user-guide/cleanrooms/migration-to-collab](https://docs.snowflake.com/user-guide/cleanrooms/migration-to-collab) |
+| **Direct link** | You may receive a link from Snowflake Support or Solutions Engineering |
+| **GitHub (v1)** | Download the code directly from the GitHub repository |
 
 ## Installation
 
 ### 1. Deploy the Backend
 
-1. Log in to **Snowsight**.
+1. Log in to [**app.snowflake.com**](https://app.snowflake.com).
 2. Open a new **SQL Worksheet**.
-3. Copy the contents of `migration-backend.sql`.
+3. Copy the contents of `migration-backend.sql` from the GitHub repository.
 4. Click **Run All**.
 
 This creates the `DCR_SNOWVA.MIGRATION` schema with all stored procedures and the `MIGRATION_JOBS` audit table.
 
 ### 2. Deploy the Streamlit App
 
-1. In Snowsight, navigate to **Streamlit**.
-2. Click **+ Streamlit App**.
-3. Name it `DCR Migration Tool`.
-4. Select a **Warehouse** and set the database/schema to `DCR_SNOWVA.MIGRATION`.
-5. Paste the contents of `streamlit_app.py` into the editor.
-6. Click **Run**.
+You have two options:
+
+#### Option A: Create from Repository (Preferred)
+
+1. In [app.snowflake.com](https://app.snowflake.com), navigate to **Streamlit**.
+2. Click **Create from Repository**.
+3. Paste the GitHub repository URL.
+4. Select the **Database** where the app will be stored and the **Warehouse** used to run it.
+5. Click **Create**.
+
+#### Option B: Manual Upload
+
+1. Download `streamlit_app.py` from the GitHub repository.
+2. In [app.snowflake.com](https://app.snowflake.com), navigate to **Streamlit**.
+3. Click **+ Streamlit App**.
+4. Name it `Data Clean Room v1-to-v2 Migration Tool`.
+5. Select a **Warehouse** and set the database/schema to `DCR_SNOWVA.MIGRATION`.
+6. Paste the contents of `streamlit_app.py` into the editor.
+7. Click **Create**.
+
+### 3. Open the App
+
+1. After creating, select the Streamlit app you just installed.
+2. The app runs under `SAMOOHA_APP_ROLE` by default.
+
+> **Sharing:** By default, no other users in the account can see or use the app. The app owner can choose **"Share this app"** to grant access to other users or roles.
 
 ---
 
