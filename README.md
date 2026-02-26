@@ -1,125 +1,144 @@
-DCR Migration Tool
+# DCR Migration Tool
 
-Version: 1.0.0
-Target Architecture: Snowflake Collaboration Hub (API v2.0)
-Source Architecture: Snowflake Native App Clean Rooms (Legacy Provider/Consumer)
+> **Version:** 2.1.0 &nbsp;|&nbsp; **Target:** Snowflake Collaboration Hub (API v2.0) &nbsp;|&nbsp; **Source:** Legacy Provider & Consumer (P&C) Clean Rooms
 
-Overview
+---
 
-The DCR Migration Tool is an automated engine designed to upgrade legacy Provider & Consumer (P&C) cleanrooms to the new Snowflake Collaboration Hub architecture. It abstracts the complexity of manually writing YAML specifications and API calls into a streamlined Plan → Execute → Finalize → Validate workflow.
+## Overview
 
-The solution consists of:
+The DCR Migration Tool is an automated engine that upgrades legacy P&C API cleanrooms to the new Snowflake Collaboration Hub architecture. It abstracts the complexity of writing YAML specifications and API calls into a streamlined **Plan → Execute → Finalize → Validate** workflow.
 
-Backend: A suite of Snowflake Stored Procedures (Python) that handle logic, spec generation, and API orchestration.
+| Component | Description |
+|-----------|-------------|
+| **Backend** | Suite of Snowflake Stored Procedures (Python) for spec generation, orchestration, and audit logging |
+| **Frontend** | Streamlit App (running in Snowsight) providing a guided migration UI |
 
-Frontend: A Streamlit App (running in Snowsight) that provides a user-friendly interface for the migration.
+---
 
-Features
+## Features
 
-Automated Discovery: Automatically detects if you are the Provider or Consumer of a cleanroom.
+- **Automated Discovery** — Detects your role (Provider or Consumer) and enumerates templates, datasets, and policies from the legacy cleanroom.
+- **Spec Generation** — Converts legacy SQL templates and table policies into v2.0 compliant YAML specs with literal block style for readability.
+- **Smart Column Type Detection** — Recognizes common join column abbreviations (`HEM`, `HPN`, `IDFA`, etc.) and maps them to valid Snowflake `column_type` identifiers.
+- **Safety Guardrails** — Pre-flight checks prevent migration of unsupported configurations (Python UDFs, multi-provider, etc.).
+- **Deterministic Versioning** — Provider and Consumer generate matching artifact IDs without manual coordination.
+- **Parity Validation** — Compares the new Collaboration against the legacy Cleanroom to verify template and data offering coverage.
+- **Audit Logging** — Every migration run is logged to `MIGRATION_JOBS` with job ID, timestamps, status, and details.
+- **Migration History** — "Migrated DCRs" view shows all past migrations with live collaboration status and job metadata.
+- **Re-migration Support** — Teardown a failed collaboration and re-run; templates and data offerings are safely skipped if already registered.
 
-Spec Generation: Converts legacy SQL templates and table policies into v2.0 compliant YAML specifications.
+---
 
-Safety Guardrails: Pre-flight checks prevent migration of unsupported configurations (e.g., Python code, Multi-Provider).
+## Prerequisites
 
-Deterministic Versioning: Ensures Provider and Consumer generate matching IDs for shared artifacts without manual coordination.
+| Requirement | Details |
+|-------------|---------|
+| **Snowflake Account** | Access to an account with the Samooha Native App installed |
+| **Role** | `SAMOOHA_APP_ROLE` for running the backend and Streamlit app |
+| **Privileges** | Ability to create databases/schemas (for tool installation) and call Native App procedures |
 
-Parity Validation: Verifies that the new Collaboration contains the same artifacts as the legacy cleanroom.
+---
 
-Prerequisites
+## Installation
 
-Snowflake Account: Access to a Snowflake account with the Samooha Native App installed.
+### 1. Deploy the Backend
 
-Role: You must execute the backend script and run the Streamlit app using the SAMOOHA_APP_ROLE.
+1. Log in to **Snowsight**.
+2. Open a new **SQL Worksheet**.
+3. Copy the contents of `migration-backend.sql`.
+4. Click **Run All**.
 
-Privileges: The role must have permissions to create databases/schemas (to install the tool) and call Native App procedures.
+This creates the `DCR_SNOWVA.MIGRATION` schema with all stored procedures and the `MIGRATION_JOBS` audit table.
 
-Installation
+### 2. Deploy the Streamlit App
 
-1. Deploy the Backend
+1. In Snowsight, navigate to **Streamlit**.
+2. Click **+ Streamlit App**.
+3. Name it `DCR Migration Tool`.
+4. Select a **Warehouse** and set the database/schema to `DCR_SNOWVA.MIGRATION`.
+5. Paste the contents of `streamlit_app.py` into the editor.
+6. Click **Run**.
 
-Log in to Snowsight.
+---
 
-Open a new SQL Worksheet.
+## Usage Workflow
 
-Copy the contents of migration_backend.sql.
+### Phase 1: Plan
 
-Run the entire script ("Run All").
+1. In the sidebar, click **P&C Cleanrooms** to list eligible legacy cleanrooms.
+2. Select a cleanroom from the dropdown (or type the name manually).
+3. Click **Generate Plan**.
+4. Review the summary: role, template count, dataset count, and the generated SQL script.
 
-This will create the DCR_SNOWVA.MIGRATION schema and all necessary stored procedures.
+### Phase 2: Execute Setup
 
-2. Deploy the Streamlit App
+1. Go to the **Execute Setup** tab.
+2. Click **Execute Setup Now**.
+   - **Provider:** Registers all templates and data offerings, then generates the collaboration spec.
+   - **Consumer:** Registers local datasets and data offerings required for the cleanroom.
+3. Review the generated script and copy it to a Snowflake Worksheet if manual execution is needed.
 
-In Snowsight, go to Streamlit.
+### Phase 3: Finalize (Join)
 
-Click + Streamlit App.
+1. Go to the **Finalize (Join)** tab.
+2. Click **Check Status** until the collaboration status returns `CREATED` or `INVITED`.
+3. Copy the provided JOIN SQL and run it in a **Snowflake SQL Worksheet**.
 
-Name it "DCR Migration Tool".
+> **Note:** The JOIN command requires `SYSTEM$ACCEPT_LEGAL_TERMS` which cannot execute from within Streamlit. The UI provides a ready-to-paste SQL snippet.
 
-Select a Warehouse and the Database/Schema where you deployed the backend (DCR_SNOWVA.MIGRATION).
+> **Note:** If JOIN fails with `ReferenceUsageGrantMissingException`, an ACCOUNTADMIN must grant `REFERENCE_USAGE` on the relevant database to the share name shown in the error. See the warning in the Finalize tab for the exact command.
 
-Paste the contents of streamlit_app.py into the editor.
+### Phase 4: Validate
 
-Click Run.
+1. Go to the **Validate** tab.
+2. Click **Run Validation Check**.
+3. The tool compares artifacts in the new Collaboration against the legacy Cleanroom and reports any discrepancies with remediation hints.
 
-Usage Workflow
+### Re-migration (Recovery)
 
-The tool follows a specific sequence to ensuring data integrity:
+If a collaboration ends up in a bad state (`JOIN_FAILED`, etc.):
 
-Phase 1: Configuration & Plan
+1. Go to the **Cleanup** tab and run **Teardown** to remove the collaboration.
+2. Re-run **Execute** — templates and data offerings that already exist will be skipped automatically.
+3. Re-do the **Join** step.
 
-Enter the Legacy Cleanroom Name (e.g., mj_act_uc) in the sidebar.
+---
 
-Click Generate Plan.
+## Sidebar Features
 
-The tool scans the legacy environment and generates a migration plan (SQL script).
+| Feature | Description |
+|---------|-------------|
+| **P&C Cleanrooms** | Lists eligible legacy cleanrooms; filters out UI-created and internal UUID rooms |
+| **Migrated DCRs** | Shows all past migrations from the `MIGRATION_JOBS` table with live collaboration status |
+| **`[migrated]` Badge** | P&C cleanrooms that have already been migrated display a badge in the dropdown |
 
-Review the summary (Role, Template count, Dataset count).
+---
 
-Phase 2: Execute Setup
+## Troubleshooting
 
-Go to the "1. Execute Setup" tab.
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Side Effects [SYSTEM$ACCEPT_LEGAL_TERMS]` | Stored Procedures / Streamlit cannot accept legal terms | Copy the SQL from the Finalize tab and run it in a SQL Worksheet |
+| `ReferenceUsageGrantMissingException` | Missing `REFERENCE_USAGE` grant on database for the collaboration share | Run `GRANT REFERENCE_USAGE ON DATABASE <db> TO SHARE <share>;` as ACCOUNTADMIN |
+| `SpecValidationError: column_type invalid` | Unrecognized join column name | The tool auto-detects common abbreviations (HEM, HPN, etc.); for others, omit `column_type` or set it manually |
+| `Cleanroom not found` | Wrong name or missing role | Verify the exact legacy cleanroom name and ensure `SAMOOHA_APP_ROLE` is active |
+| `No data offerings found` (Provider) | No linked datasets in legacy cleanroom | Link datasets to the legacy cleanroom before migrating |
+| `No data offerings found` (Consumer) | Normal for consumer-only migrations | The tool skips data registration and proceeds to joining |
+| Parity check shows "Missing templates" | Templates registered but not found in collaboration | Check the diagnostic output; may need to teardown and re-create the collaboration |
 
-Click Execute Setup Now.
+---
 
-Provider: This registers all templates/datasets and initializes the Collaboration.
+## File Structure
 
-Consumer: This registers any local datasets required for the cleanroom.
+```
+dcr_migration_tool/
+├── migration-backend.sql   # Snowflake stored procedures (deploy first)
+├── streamlit_app.py        # Streamlit UI (deploy to Snowsight)
+└── README.md               # This file
+```
 
-Phase 3: Finalize (Status & Join)
+---
 
-Snowflake requires manual confirmation for joining collaborations due to legal terms acceptance.
+## License
 
-Go to the "2. Finalize" tab.
-
-Click Check Status periodically until the status returns CREATED.
-
-Click Join Collaboration.
-
-Note: If the automated join fails (due to "Side Effects/Legal Terms"), the UI will provide a SQL snippet for you to run manually in a worksheet.
-
-Phase 4: Validate
-
-Go to the "Validate" tab.
-
-Click Run Validation Check.
-
-The tool compares the artifacts in the new Collaboration against the legacy Cleanroom to ensure 100% parity.
-
-Troubleshooting
-
-"Side Effects [SYSTEM$ACCEPT_LEGAL_TERMS]": This error occurs because Stored Procedures cannot accept legal terms on your behalf.
-
-Fix: Copy the manual code provided in the "Finalize" tab and run it in a standard SQL Worksheet.
-
-"Cleanroom not found": Ensure you are using the exact name of the legacy cleanroom and that you have SAMOOHA_APP_ROLE active.
-
-"No data offerings found":
-
-Provider: You must have data to migrate.
-
-Consumer: This is normal; the tool will skip data registration and proceed to joining.
-
-License
-
-Proprietary - Internal Use Only.
+Proprietary — Internal Use Only.
