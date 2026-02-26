@@ -137,8 +137,6 @@ dcr_migration_tool/
 └── README.md               # This file
 ```
 
----
 
-## License
 
-Proprietary — Internal Use Only.
+
